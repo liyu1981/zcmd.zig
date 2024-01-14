@@ -50,11 +50,13 @@ We will be able to get the second "uname -a" result even that the first command 
 
 ### through Zig Package Manager
 
-add following lines to your `build.zig.zon` dependencies
-
-```zig
+use following bash in your project folder (with `build.zig.zon`)
 
 ```
+zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+you can change the version `v0.1.0` to other version if there are in [release](https://github.com/liyu1981/zcmd.zig/releases) page.
 
 ### or simply just copy `zcmd.zig` file to your project
 
