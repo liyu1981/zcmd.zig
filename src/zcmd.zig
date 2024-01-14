@@ -233,11 +233,13 @@ pub fn runCommandAndGetResult(args: struct {
         .Signal => |ret| {
             stderr_writer.print("Command: {s} exited with signal {d}! Error!", .{ args.command, ret }) catch {};
         },
-        .Stopped => |ret| {
-            stderr_writer.print("Command: {s} stopped with {d}! Error!", .{ args.command, ret }) catch {};
+        .Stopped => |_| {
+            // stderr_writer.print("Command: {s} stopped with {d}! Error!", .{ args.command, ret }) catch {};
+            @panic("never able to reach here until https://github.com/ziglang/zig/issues/18548 resolved.");
         },
-        .Unknown => |ret| {
-            stderr_writer.print("Command: {s} exited with unknown reason {d}! Error!", .{ args.command, ret }) catch {};
+        .Unknown => |_| {
+            // stderr_writer.print("Command: {s} exited with unknown reason {d}! Error!", .{ args.command, ret }) catch {};
+            @panic("never able to reach here until https://github.com/ziglang/zig/issues/18548 resolved.");
         },
     }
 
@@ -291,10 +293,15 @@ pub fn runPipedCommandAndGetResult(args: struct {
             .expand_arg0 = args.expand_arg0,
         }, panic_msg);
 
+        defer {
+            if (i > 0) {
+                to_free_result.deinit();
+            }
+        }
+
         if (args.stop_on_any_stderr and last_run_result.stderr.len > 0) {
             return last_run_result;
         }
-        if (i > 0) to_free_result.deinit();
     }
     return last_run_result;
 }

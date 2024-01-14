@@ -1,4 +1,9 @@
+a.out
+*.o
 tests/exit_sigabrt
+tests/exit_stop
+tests/exit_unknown
+tests/wait_test
 cov/
 
 # Created by https://www.toptal.com/developers/gitignore/api/zig,macos
