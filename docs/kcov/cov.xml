@@ -1,13 +1,13 @@
 <?xml version="1.0" ?>
 <!DOCTYPE coverage SYSTEM 'http://cobertura.sourceforge.net/xml/coverage-04.dtd'>
-<coverage line-rate="0.981" lines-covered="208" lines-valid="212" branch-rate="1.0" branches-covered="1.0" branches-rate="1.0" complexity="1.0" version="1.9" timestamp="1705222549">
+<coverage line-rate="0.858" lines-covered="182" lines-valid="212" branch-rate="1.0" branches-covered="1.0" branches-rate="1.0" complexity="1.0" version="1.9" timestamp="1705228877">
 	<sources>
 		<source>/Users/bytedance/DevCamp/zcmd/src/</source>
 	</sources>
 	<packages>
-		<package name="zcmd_kcov_test4" line-rate="0.981" lines-covered="208" lines-valid="212" branch-rate="1.0" complexity="1.0">
+		<package name="zcmd_kcov_test4" line-rate="0.858" lines-covered="182" lines-valid="212" branch-rate="1.0" complexity="1.0">
 			<classes>
-				<class name="zcmd_zig__0" filename="zcmd.zig" branch-rate="1.0" complexity="1.0" line-rate="0.977">
+				<class name="zcmd_zig__0" filename="zcmd.zig" branch-rate="1.0" complexity="1.0" line-rate="0.831">
 					<lines>
 						<line number="13" hits="1"/>
 						<line number="14" hits="1"/>
@@ -61,8 +61,8 @@
 						<line number="127" hits="1"/>
 						<line number="130" hits="1"/>
 						<line number="131" hits="1"/>
-						<line number="133" hits="1"/>
-						<line number="138" hits="1"/>
+						<line number="133" hits="0"/>
+						<line number="138" hits="0"/>
 						<line number="142" hits="1"/>
 						<line number="143" hits="1"/>
 						<line number="144" hits="1"/>
@@ -73,9 +73,9 @@
 						<line number="153" hits="1"/>
 						<line number="154" hits="1"/>
 						<line number="156" hits="1"/>
-						<line number="160" hits="1"/>
-						<line number="161" hits="1"/>
-						<line number="163" hits="1"/>
+						<line number="160" hits="0"/>
+						<line number="161" hits="0"/>
+						<line number="163" hits="0"/>
 						<line number="168" hits="1"/>
 						<line number="187" hits="1"/>
 						<line number="188" hits="1"/>
@@ -163,27 +163,27 @@
 						<line number="389" hits="1"/>
 						<line number="392" hits="1"/>
 						<line number="400" hits="1"/>
-						<line number="407" hits="1"/>
-						<line number="416" hits="1"/>
-						<line number="417" hits="1"/>
-						<line number="419" hits="1"/>
-						<line number="420" hits="1"/>
-						<line number="423" hits="1"/>
-						<line number="431" hits="1"/>
-						<line number="432" hits="1"/>
-						<line number="433" hits="1"/>
-						<line number="436" hits="1"/>
-						<line number="445" hits="1"/>
-						<line number="446" hits="1"/>
-						<line number="448" hits="1"/>
-						<line number="449" hits="1"/>
-						<line number="450" hits="1"/>
-						<line number="453" hits="1"/>
-						<line number="462" hits="1"/>
-						<line number="463" hits="1"/>
-						<line number="465" hits="1"/>
-						<line number="466" hits="1"/>
-						<line number="467" hits="1"/>
+						<line number="407" hits="0"/>
+						<line number="416" hits="0"/>
+						<line number="417" hits="0"/>
+						<line number="419" hits="0"/>
+						<line number="420" hits="0"/>
+						<line number="423" hits="0"/>
+						<line number="431" hits="0"/>
+						<line number="432" hits="0"/>
+						<line number="433" hits="0"/>
+						<line number="436" hits="0"/>
+						<line number="445" hits="0"/>
+						<line number="446" hits="0"/>
+						<line number="448" hits="0"/>
+						<line number="449" hits="0"/>
+						<line number="450" hits="0"/>
+						<line number="453" hits="0"/>
+						<line number="462" hits="0"/>
+						<line number="463" hits="0"/>
+						<line number="465" hits="0"/>
+						<line number="466" hits="0"/>
+						<line number="467" hits="0"/>
 						<line number="471" hits="1"/>
 						<line number="474" hits="1"/>
 					</lines>

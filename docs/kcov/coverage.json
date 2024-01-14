@@ -1,13 +1,13 @@
 {
   "files": [
-    {"file": "/Users/bytedance/DevCamp/zcmd/src/zcmd.zig", "percent_covered": "100.00", "covered_lines": "171", "total_lines": "171"},
+    {"file": "/Users/bytedance/DevCamp/zcmd/src/zcmd.zig", "percent_covered": "84.80", "covered_lines": "145", "total_lines": "171"},
     {"file": "/Users/bytedance/DevCamp/zcmd/src/panicTest.zig", "percent_covered": "100.00", "covered_lines": "35", "total_lines": "35"}
   ],
-  "percent_covered": "100.00",
-  "covered_lines": 206,
+  "percent_covered": "87.38",
+  "covered_lines": 180,
   "total_lines": 206,
   "percent_low": 25,
   "percent_high": 75,
   "command": "zcmd_kcov_test4",
-  "date": "2024-01-14 19:55:49"
+  "date": "2024-01-14 21:41:17"
 }

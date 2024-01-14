@@ -12,9 +12,9 @@ var data = {lines:[
 {"lineNum":"   11","line":"    }, \"test witherr_exit_zero.sh\");"},
 {"lineNum":"   12","line":"}"},
 {"lineNum":"   13","line":""},
-{"lineNum":"   14","line":"test \"runCommandAndGetResult exit with sigabrt\" {","class":"lineCov","hits":"1","order":"207",},
-{"lineNum":"   15","line":"    const allocator = testing.allocator;","class":"lineCov","hits":"1","order":"206",},
-{"lineNum":"   16","line":"    _ = zcmd.runCommandAndGetResult(.{","class":"lineCov","hits":"1","order":"205",},
+{"lineNum":"   14","line":"test \"runCommandAndGetResult exit with sigabrt\" {","class":"lineCov","hits":"1","order":"181",},
+{"lineNum":"   15","line":"    const allocator = testing.allocator;","class":"lineCov","hits":"1","order":"180",},
+{"lineNum":"   16","line":"    _ = zcmd.runCommandAndGetResult(.{","class":"lineCov","hits":"1","order":"179",},
 {"lineNum":"   17","line":"        .allocator = allocator,"},
 {"lineNum":"   18","line":"        // guranteed no binary panic"},
 {"lineNum":"   19","line":"        .command = &[_][]const u8{\"./tests/exit_sigabrt\"},"},
@@ -125,5 +125,5 @@ var data = {lines:[
 {"lineNum":"  124","line":"}"},
 ]};
 var percent_low = 25;var percent_high = 75;
-var header = { "command" : "zcmd_kcov_test4", "date" : "2024-01-14 19:55:49", "instrumented" : 35, "covered" : 35,};
+var header = { "command" : "zcmd_kcov_test4", "date" : "2024-01-14 21:41:17", "instrumented" : 35, "covered" : 35,};
 var merged_data = [];
