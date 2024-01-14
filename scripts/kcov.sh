@@ -24,12 +24,4 @@ for ((TEST_NUM=2; TEST_NUM<FILTERS_LEN+2; TEST_NUM++)); do
   ${KCOV} ./cov --include-path=$(pwd) "${TEST_BIN_BASE}${TEST_NUM}"
 done
 
-# zig test -femit-bin=${TEST_BIN_BASE}3 src/panicTest.zig --test-filter "runCommandAndGetResult no binary panics trigger"
-# ${KCOV} ./cov --include-path=$(pwd) ${TEST_BIN_BASE}3
-
-# zig test -femit-bin=${TEST_BIN_BASE}4 src/panicTest.zig --test-filter "runCommandAndGetResult exit with sigabrt"
-# ${KCOV} ./cov --include-path=$(pwd) ${TEST_BIN_BASE}4
-
-# zig test -femit-bin=${TEST_BIN_BASE}5 src/panicTest.zig --test-filter "runCommandAndGetResult exit with not zero"
-# ${KCOV} ./cov --include-path=$(pwd) ${TEST_BIN_BASE}5
 echo "All tests done, coverage generated."
