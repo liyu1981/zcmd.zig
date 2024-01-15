@@ -1,0 +1,14 @@
+./tests
+./tests/wait_test.c
+./tests/small_input.txt
+./tests/exit_stop.c
+./tests/exit_unknown.o
+./tests/run_child_test.zig
+./tests/exit_stop
+./tests/exit_sigabrt
+./tests/exit_unknown
+./tests/big_input.txt
+./tests/wait_test
+./tests/exit_sigabrt.c
+./tests/exit_unknown.c
+./tests/witherr_exit_zero.sh
