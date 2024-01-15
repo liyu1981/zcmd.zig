@@ -2,6 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+const os_selector = switch (builtin.os.tag) {
+    .linux, .macos => void,
+    else => {
+        @compileError("Only linux & macos supported.");
+    },
+};
+
 const OS_PAGE_SIZE = switch (builtin.os.tag) {
     .linux, .macos => std.mem.page_size,
     else => {
@@ -13,24 +20,107 @@ pub const MAX_OUTPUT = 8 * 1024 * 1024 * 1024;
 
 const stderr_writer = std.io.getStdErr().writer();
 
-pub const SimpleRunResult = struct {
+pub const RunResult = struct {
     allocator: std.mem.Allocator,
+
+    term: Term,
     stdout: []const u8,
     stderr: []const u8,
 
-    pub fn deinit(this: *const SimpleRunResult) void {
+    pub fn deinit(this: *const RunResult) void {
         this.allocator.free(this.stdout);
         this.allocator.free(this.stderr);
     }
 };
 
-/// This one is a simple wrapper of std.ChildProcess.runChildProcess, by providing a little bit of convinience.
-/// * it defaults will use cwd if not provided
-/// * it increases the default max_output_bytes to 8G!
-/// * it can accept a stdin_input: []const u8 as the stdin
-/// It will return an error or std.ChildProcess.RunResult, receiver is responsible to free the slices inside
-/// `std.ChildProcess.RunResult`
-pub fn runCommandAndGetResultErr(args: struct {
+pub fn runCommandsErr(args: struct {
+    allocator: std.mem.Allocator,
+    commands: []const []const []const u8,
+    stdin_input: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
+    cwd_dir: ?std.fs.Dir = null,
+    env_map: ?*const std.process.EnvMap = null,
+    max_output_bytes: usize = MAX_OUTPUT,
+    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
+    trim_stdout: bool = true,
+    trim_stderr: bool = true,
+    stop_on_any_error: bool = true,
+    stop_on_any_stderr: bool = false,
+}) anyerror!RunResult {
+    // var need_free_to_free: bool = false;
+    // var to_free_result: std.ChildProcess.RunResult = undefined;
+    // var need_free_last: bool = true;
+    var last_run_result: RunResult = undefined;
+    // for (args.commands, 0..) |command, i| {
+    //     if (i > 0 and need_free_last) {
+    //         to_free_result = last_run_result;
+    //         need_free_to_free = true;
+    //     }
+    last_run_result = try runCommandErr(.{
+        .allocator = args.allocator,
+        .command = args.commands[0],
+        .stdin_input = brk: {
+            //if (i == 0) {
+            if (args.stdin_input) |stdin_input| break :brk stdin_input else break :brk null;
+            //} else break :brk last_run_result.stdout;
+        },
+        .cwd = args.cwd,
+        .cwd_dir = args.cwd_dir,
+        .env_map = args.env_map,
+        .max_output_bytes = args.max_output_bytes,
+        .expand_arg0 = args.expand_arg0,
+    });
+    return last_run_result;
+    //     }) catch |err| {
+    //         defer {
+    //             if (i > 0 and need_free_to_free) {
+    //                 args.allocator.free(to_free_result.stdout);
+    //                 args.allocator.free(to_free_result.stderr);
+    //                 need_free_to_free = false;
+    //             }
+    //         }
+    //         if (args.stop_on_any_error) {
+    //             return err;
+    //         }
+    //         last_run_result = std.ChildProcess.RunResult{
+    //             .term = std.ChildProcess.Term{ .Exited = 1 },
+    //             .stdout = "",
+    //             .stderr = "",
+    //         };
+    //         need_free_last = false;
+    //         continue;
+    //     };
+    //     defer {
+    //         if (i > 0 and need_free_to_free) {
+    //             args.allocator.free(to_free_result.stdout);
+    //             args.allocator.free(to_free_result.stderr);
+    //             need_free_to_free = false;
+    //         }
+    //     }
+    //     switch (last_run_result.term) {
+    //         .Exited => |ret| {
+    //             if (ret != 0 and args.stop_on_any_error) {
+    //                 return last_run_result;
+    //             }
+    //             if (last_run_result.stderr.len > 0 and args.stop_on_any_stderr) {
+    //                 return last_run_result;
+    //             }
+    //             need_free_last = true;
+    //             continue;
+    //         },
+    //         else => {
+    //             if (args.stop_on_any_error) {
+    //                 return last_run_result;
+    //             }
+    //             need_free_last = true;
+    //             continue;
+    //         },
+    //     }
+    // }
+    // return last_run_result;
+}
+
+pub fn runCommandErr(args: struct {
     allocator: std.mem.Allocator,
     command: []const []const u8,
     stdin_input: ?[]const u8 = null,
@@ -38,10 +128,10 @@ pub fn runCommandAndGetResultErr(args: struct {
     cwd_dir: ?std.fs.Dir = null,
     env_map: ?*const std.process.EnvMap = null,
     max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
-}) anyerror!std.ChildProcess.RunResult {
+    expand_arg0: ChildProcess.Arg0Expand = .no_expand,
+}) anyerror!RunResult {
     // shameless steal the implementation of runChildProcess from zig source code as I need to customize it a bit
-    var child = std.ChildProcess.init(args.command, args.allocator);
+    var child = ChildProcess.init(args.command, args.allocator);
     child.stdin_behavior = if (args.stdin_input == null) .Ignore else .Pipe;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -62,284 +152,10 @@ pub fn runCommandAndGetResultErr(args: struct {
 
     try child.spawn();
 
-    if (child.stdin_behavior == .Pipe) {
-        if (args.stdin_input) |stdin_input| {
-            // start a thread to send stdin_input to child process instead of in main thread. This is crucial in cases like
-            // chained commands because the child process may have error.FileNotFound(like not find the binary), so that
-            // child.stdin pipe is broken, then without a threaded solution we will stuck in the feeding loop.
-            var t: std.Thread = try std.Thread.spawn(
-                .{},
-                sendStdinToCommand,
-                .{
-                    &child,
-                    stdin_input,
-                },
-            );
-            // this is very dangerous as we let our thread on their own, but hopefully we know what's we are doing here
-            t.detach();
-        }
-    }
-
-    try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
-    // t.join();
-
-    const rr = std.ChildProcess.RunResult{
-        .term = try child.wait(),
-        .stdout = try stdout.toOwnedSlice(),
-        .stderr = try stderr.toOwnedSlice(),
-    };
-
-    return rr;
-}
-
-/// This wraps `runCommandAndGetResultErr` to enabled chained commands, such as `ls -la | wc -l`, can be called with
-/// ```
-/// runChainedCommandsAndGetResultErr(.{ .allocator = allocator, .commands = &[_][]const []const u8{
-///     &.{"ls", "la"},
-///     &.{"wc", "-l"},
-/// }});
-/// ```
-///
-/// It is called chained commands instead of piped commands because foundamentally it does not use unix pipes to
-/// implement. Instead it will try to run command one by one and cache the intermediate result in mem, and then feed
-/// into next command as stdin. There is currently no good way of writting real piped commands in zig without rewrite
-/// std.ChildProcess.
-///
-/// As a result, it also provides option `stop_on_any_error` and `stop_on_any_stderr` to control the flow a bit
-/// * when `stop_on_any_error` is true (default is true), will stop at the first command return `anyerror`,
-///   or exit rather than return `0`. In the end return the last command's `std.ChildProcess.RunResult`.
-/// * when `stop_on_any_stderr` is true (default is false), will stop at the first command exit with return `0`, but
-///   with `stderr` not empty. In the end return the last command's `std.ChildProcess.RunResult`.
-pub fn runChainedCommandsAndGetResultErr(args: struct {
-    allocator: std.mem.Allocator,
-    commands: []const []const []const u8,
-    stdin_input: ?[]const u8 = null,
-    cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
-    max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
-    trim_stdout: bool = true,
-    trim_stderr: bool = true,
-    stop_on_any_error: bool = true,
-    stop_on_any_stderr: bool = false,
-}) anyerror!std.ChildProcess.RunResult {
-    var need_free_to_free: bool = false;
-    var to_free_result: std.ChildProcess.RunResult = undefined;
-    var need_free_last: bool = true;
-    var last_run_result: std.ChildProcess.RunResult = undefined;
-    for (args.commands, 0..) |command, i| {
-        if (i > 0 and need_free_last) {
-            to_free_result = last_run_result;
-            need_free_to_free = true;
-        }
-        last_run_result = runCommandAndGetResultErr(.{
-            .allocator = args.allocator,
-            .command = command,
-            .stdin_input = brk: {
-                if (i == 0) {
-                    if (args.stdin_input) |stdin_input| break :brk stdin_input else break :brk null;
-                } else break :brk last_run_result.stdout;
-            },
-            .cwd = args.cwd,
-            .cwd_dir = args.cwd_dir,
-            .env_map = args.env_map,
-            .max_output_bytes = args.max_output_bytes,
-            .expand_arg0 = args.expand_arg0,
-        }) catch |err| {
-            defer {
-                if (i > 0 and need_free_to_free) {
-                    args.allocator.free(to_free_result.stdout);
-                    args.allocator.free(to_free_result.stderr);
-                    need_free_to_free = false;
-                }
-            }
-            if (args.stop_on_any_error) {
-                return err;
-            }
-            last_run_result = std.ChildProcess.RunResult{
-                .term = std.ChildProcess.Term{ .Exited = 1 },
-                .stdout = "",
-                .stderr = "",
-            };
-            need_free_last = false;
-            continue;
-        };
-        defer {
-            if (i > 0 and need_free_to_free) {
-                args.allocator.free(to_free_result.stdout);
-                args.allocator.free(to_free_result.stderr);
-                need_free_to_free = false;
-            }
-        }
-        switch (last_run_result.term) {
-            .Exited => |ret| {
-                if (ret != 0 and args.stop_on_any_error) {
-                    return last_run_result;
-                }
-                if (last_run_result.stderr.len > 0 and args.stop_on_any_stderr) {
-                    return last_run_result;
-                }
-                need_free_last = true;
-                continue;
-            },
-            else => {
-                if (args.stop_on_any_error) {
-                    return last_run_result;
-                }
-                need_free_last = true;
-                continue;
-            },
-        }
-    }
-    return last_run_result;
-}
-
-/// No error version of `runCommandAndGetResultErr`. It will never return a error and instead @panic when some command
-/// fails. This is most suitable for script or guranteed execution. It returns SimpleRunResult with caller
-/// owned `stdout` and `stderr` slices.
-/// * `trim_stdout` and `trim_stderr` can control whether to trim white spaces of `stdout` and `stderr`. Defaultly they
-///   are true.
-pub fn runCommandAndGetResult(args: struct {
-    allocator: std.mem.Allocator,
-    command: []const []const u8,
-    stdin_input: ?[]const u8 = null,
-    cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
-    max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
-    trim_stdout: bool = true,
-    trim_stderr: bool = true,
-}, comptime panic_msg: []const u8) SimpleRunResult {
-    const rr = runCommandAndGetResultErr(.{
-        .allocator = args.allocator,
-        .command = args.command,
-        .cwd = args.cwd,
-        .cwd_dir = args.cwd_dir,
-        .max_output_bytes = args.max_output_bytes,
-        .stdin_input = args.stdin_input,
-    }) catch |err| {
-        stderr_writer.print("Command: {s} spawn failed {any}! Error!\n", .{ args.command, err }) catch {};
-        @panic(panic_msg);
-    };
-    switch (rr.term) {
-        .Exited => |ret| {
-            if (ret == 0) {
-                return SimpleRunResult{
-                    .allocator = args.allocator,
-                    .stdout = brk: {
-                        if (args.trim_stdout) {
-                            defer args.allocator.free(rr.stdout);
-                            break :brk _toOwnedSlice(
-                                u8,
-                                args.allocator,
-                                std.mem.trim(u8, rr.stdout, " \t\n\r"),
-                            ) catch {
-                                @panic("trim stdout OOM!");
-                            };
-                        } else break :brk rr.stdout;
-                    },
-                    .stderr = brk: {
-                        if (args.trim_stderr) {
-                            defer args.allocator.free(rr.stderr);
-                            break :brk _toOwnedSlice(
-                                u8,
-                                args.allocator,
-                                std.mem.trim(u8, rr.stderr, " \t\n\r"),
-                            ) catch {
-                                @panic("trim stderr OOM!");
-                            };
-                        } else break :brk rr.stderr;
-                    },
-                };
-            } else {
-                stderr_writer.print("Command: {s} exited with {d}! Error!\n", .{ args.command, ret }) catch {};
-            }
-        },
-        .Signal => |ret| {
-            stderr_writer.print("Command: {s} exited with signal {d}! Error!", .{ args.command, ret }) catch {};
-        },
-        .Stopped => |_| {
-            // stderr_writer.print("Command: {s} stopped with {d}! Error!", .{ args.command, ret }) catch {};
-            @panic("never able to reach here until https://github.com/ziglang/zig/issues/18548 resolved.");
-        },
-        .Unknown => |_| {
-            // stderr_writer.print("Command: {s} exited with unknown reason {d}! Error!", .{ args.command, ret }) catch {};
-            @panic("never able to reach here until https://github.com/ziglang/zig/issues/18548 resolved.");
-        },
-    }
-
-    stderr_writer.print("==== stdout ====\n{s}\n==== stderr ====\n{s}\n", .{ rr.stdout, rr.stderr }) catch {};
-    // we will go panic in below so no free rr.stdout & rr.stderr
-    @panic(panic_msg);
-}
-
-/// This wraps `runCommandAndGetResult` to enabled piped commands, such as `ls -la | wc -l`, can be called with
-/// ```
-/// runChainedCommandAndGetResult(.{ .allocator = allocator, .commands = &[_][]const []const u8{
-///     &.{"ls", "la"},
-///     &.{"wc", "-l"},
-/// }});
-/// ```
-/// * no `stop_on_any_error` as any error will cause @panic(panic_msg)
-/// * when `stop_on_any_stderr` is true (default is false), will stop at the first command exit with `stderr` not empty.
-///   In the end return the last command's `std.ChildProcess.RunResult`.
-pub fn runChainedCommandAndGetResult(args: struct {
-    allocator: std.mem.Allocator,
-    commands: []const []const []const u8,
-    stdin_input: ?[]const u8 = null,
-    cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
-    max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
-    trim_stdout: bool = true,
-    trim_stderr: bool = true,
-    stop_on_any_stderr: bool = false,
-}, comptime panic_msg: []const u8) SimpleRunResult {
-    var to_free_result: SimpleRunResult = undefined;
-    var last_run_result: SimpleRunResult = undefined;
-    for (args.commands, 0..) |command, i| {
-        if (i > 0) {
-            to_free_result = last_run_result;
-        }
-
-        last_run_result = runCommandAndGetResult(.{
-            .allocator = args.allocator,
-            .command = command,
-            .stdin_input = brk: {
-                if (i == 0) {
-                    if (args.stdin_input) |stdin_input| break :brk stdin_input else break :brk null;
-                } else break :brk last_run_result.stdout;
-            },
-            .cwd = args.cwd,
-            .cwd_dir = args.cwd_dir,
-            .env_map = args.env_map,
-            .max_output_bytes = args.max_output_bytes,
-            .expand_arg0 = args.expand_arg0,
-        }, panic_msg);
-
-        defer {
-            if (i > 0) {
-                to_free_result.deinit();
-            }
-        }
-
-        if (args.stop_on_any_stderr and last_run_result.stderr.len > 0) {
-            return last_run_result;
-        }
-    }
-    return last_run_result;
-}
-
-// internal functions
-
-fn sendStdinToCommand(command_child_process: *std.ChildProcess, stdin_input: ?[]const u8) void {
     // credit goes to: https://www.reddit.com/r/Zig/comments/13674ed/help_request_using_stdin_with_childprocess/
-    if (stdin_input) |si| {
+    if (args.stdin_input) |si| {
         // std.debug.print("\ninput of {d} bytes\n", .{si.len});
-        if (command_child_process.stdin) |stdin| {
+        if (child.stdin) |stdin| {
             // If want to handle stdin_input.len > PIPE_BUF case (think pipe 1G bytes to our commands), then can not
             // write all stdin_input at once as it will cause broken pipe. Instead, do a more careful write and valid
             // approach here.
@@ -380,10 +196,639 @@ fn sendStdinToCommand(command_child_process: *std.ChildProcess, stdin_input: ?[]
             }
 
             // job done, so close the stdin pipe so that child process knows input is done
-            command_child_process.*.stdin.?.close();
-            command_child_process.*.stdin = null;
+            child.stdin.?.close();
+            child.stdin = null;
         }
     }
+
+    try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
+
+    const rr = RunResult{
+        .allocator = args.allocator,
+        .term = try child.wait(),
+        .stdout = try stdout.toOwnedSlice(),
+        .stderr = try stderr.toOwnedSlice(),
+    };
+
+    return rr;
+}
+
+// internal functions
+
+pub const SpawnError = error{
+    OutOfMemory,
+
+    /// POSIX-only. `StdIo.Ignore` was selected and opening `/dev/null` returned ENODEV.
+    NoDevice,
+
+    /// Windows-only. One of:
+    /// * `cwd` was provided and it could not be re-encoded into UTF16LE, or
+    /// * The `PATH` or `PATHEXT` environment variable contained invalid UTF-8.
+    InvalidUtf8,
+
+    /// Windows-only. `cwd` was provided, but the path did not exist when spawning the child process.
+    CurrentWorkingDirectoryUnlinked,
+} ||
+    std.os.ExecveError ||
+    std.os.SetIdError ||
+    std.os.ChangeCurDirError;
+
+pub const Term = union(enum) {
+    Exited: u8,
+    Signal: u32,
+    Stopped: u32,
+    Unknown: u32,
+};
+
+pub const StdIo = enum {
+    Inherit,
+    Ignore,
+    Pipe,
+    Close,
+};
+
+// borrow just too many code from zig std.ChildProcess, but necessary
+pub const ChildProcess = struct {
+    pub const Id = std.os.pid_t;
+
+    /// Available after calling `spawn()`. This becomes `undefined` after calling `wait()`.
+    /// On Windows this is the hProcess.
+    /// On POSIX this is the pid.
+    id: Id,
+
+    allocator: std.mem.Allocator,
+
+    stdin: ?std.fs.File,
+    stdout: ?std.fs.File,
+    stderr: ?std.fs.File,
+
+    term: ?(SpawnError!Term),
+
+    argv: []const []const u8,
+
+    /// Leave as null to use the current env map using the supplied allocator.
+    env_map: ?*const std.process.EnvMap,
+
+    stdin_behavior: StdIo,
+    stdout_behavior: StdIo,
+    stderr_behavior: StdIo,
+
+    /// Set to change the user id when spawning the child process.
+    uid: ?std.os.uid_t,
+
+    /// Set to change the group id when spawning the child process.
+    gid: ?std.os.gid_t,
+
+    /// Set to change the current working directory when spawning the child process.
+    cwd: ?[]const u8,
+    /// Set to change the current working directory when spawning the child process.
+    /// This is not yet implemented for Windows. See https://github.com/ziglang/zig/issues/5190
+    /// Once that is done, `cwd` will be deprecated in favor of this field.
+    cwd_dir: ?std.fs.Dir = null,
+
+    err_pipe: ?[2]std.os.fd_t,
+
+    expand_arg0: Arg0Expand,
+
+    /// Darwin-only. Disable ASLR for the child process.
+    disable_aslr: bool = false,
+
+    /// Darwin-only. Start child process in suspended state as if SIGSTOP was sent.
+    start_suspended: bool = false,
+
+    /// Set to true to obtain rusage information for the child process.
+    /// Depending on the target platform and implementation status, the
+    /// requested statistics may or may not be available. If they are
+    /// available, then the `resource_usage_statistics` field will be populated
+    /// after calling `wait`.
+    /// On Linux and Darwin, this obtains rusage statistics from wait4().
+    request_resource_usage_statistics: bool = false,
+
+    /// This is available after calling wait if
+    /// `request_resource_usage_statistics` was set to `true` before calling
+    /// `spawn`.
+    resource_usage_statistics: ResourceUsageStatistics = .{},
+
+    pub const ResourceUsageStatistics = struct {
+        rusage: @TypeOf(rusage_init) = rusage_init,
+
+        /// Returns the peak resident set size of the child process, in bytes, if available.
+        pub inline fn getMaxRss(rus: ResourceUsageStatistics) ?usize {
+            switch (builtin.os.tag) {
+                .linux => {
+                    if (rus.rusage) |ru| {
+                        return @as(usize, @intCast(ru.maxrss)) * 1024;
+                    } else {
+                        return null;
+                    }
+                },
+                .macos, .ios => {
+                    if (rus.rusage) |ru| {
+                        // Darwin oddly reports in bytes instead of kilobytes.
+                        return @as(usize, @intCast(ru.maxrss));
+                    } else {
+                        return null;
+                    }
+                },
+                else => return null,
+            }
+        }
+
+        const rusage_init = switch (builtin.os.tag) {
+            .linux, .macos, .ios => @as(?std.os.rusage, null),
+            else => {},
+        };
+    };
+
+    pub const Arg0Expand = std.os.Arg0Expand;
+
+    /// First argument in argv is the executable.
+    pub fn init(argv: []const []const u8, allocator: std.mem.Allocator) ChildProcess {
+        return .{
+            .allocator = allocator,
+            .argv = argv,
+            .id = undefined,
+            .err_pipe = null,
+            .term = null,
+            .env_map = null,
+            .cwd = null,
+            .uid = null,
+            .gid = null,
+            .stdin = null,
+            .stdout = null,
+            .stderr = null,
+            .stdin_behavior = StdIo.Inherit,
+            .stdout_behavior = StdIo.Inherit,
+            .stderr_behavior = StdIo.Inherit,
+            .expand_arg0 = .no_expand,
+        };
+    }
+
+    pub fn setUserName(self: *ChildProcess, name: []const u8) !void {
+        const user_info = try std.process.getUserInfo(name);
+        self.uid = user_info.uid;
+        self.gid = user_info.gid;
+    }
+
+    /// On success must call `kill` or `wait`.
+    /// After spawning the `id` is available.
+    pub fn spawn(self: *ChildProcess) SpawnError!void {
+        if (!std.process.can_spawn) {
+            @compileError("the target operating system cannot spawn processes");
+        }
+
+        if (builtin.os.tag == .windows) {
+            return self.spawnWindows();
+        } else {
+            return self.spawnPosix();
+        }
+    }
+
+    pub fn spawnAndWait(self: *ChildProcess) SpawnError!Term {
+        try self.spawn();
+        return self.wait();
+    }
+
+    /// Forcibly terminates child process and then cleans up all resources.
+    pub inline fn kill(self: *ChildProcess) !Term {
+        return self.killPosix();
+    }
+
+    pub fn killPosix(self: *ChildProcess) !Term {
+        if (self.term) |term| {
+            self.cleanupStreams();
+            return term;
+        }
+        std.os.kill(self.id, std.os.SIG.TERM) catch |err| switch (err) {
+            error.ProcessNotFound => return error.AlreadyTerminated,
+            else => return err,
+        };
+        try self.waitUnwrapped();
+        return self.term.?;
+    }
+
+    /// Blocks until child process terminates and then cleans up all resources.
+    pub inline fn wait(self: *ChildProcess) !Term {
+        const term = try self.waitPosix();
+        self.id = undefined;
+        return term;
+    }
+
+    fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
+        if (fifo.head > 0) {
+            @memcpy(fifo.buf[0..fifo.count], fifo.buf[fifo.head..][0..fifo.count]);
+        }
+        const result = std.ArrayList(u8){
+            .items = fifo.buf[0..fifo.count],
+            .capacity = fifo.buf.len,
+            .allocator = fifo.allocator,
+        };
+        fifo.* = std.io.PollFifo.init(fifo.allocator);
+        return result;
+    }
+
+    /// Collect the output from the process's stdout and stderr. Will return once all output
+    /// has been collected. This does not mean that the process has ended. `wait` should still
+    /// be called to wait for and clean up the process.
+    ///
+    /// The process must be started with stdout_behavior and stderr_behavior == .Pipe
+    pub fn collectOutput(
+        child: ChildProcess,
+        stdout: *std.ArrayList(u8),
+        stderr: *std.ArrayList(u8),
+        max_output_bytes: usize,
+    ) !void {
+        std.debug.assert(child.stdout_behavior == .Pipe);
+        std.debug.assert(child.stderr_behavior == .Pipe);
+
+        // we could make this work with multiple allocators but YAGNI
+        if (stdout.allocator.ptr != stderr.allocator.ptr or
+            stdout.allocator.vtable != stderr.allocator.vtable)
+            @panic("ChildProcess.collectOutput only supports 1 allocator");
+
+        var poller = std.io.poll(stdout.allocator, enum { stdout, stderr }, .{
+            .stdout = child.stdout.?,
+            .stderr = child.stderr.?,
+        });
+        defer poller.deinit();
+
+        while (try poller.poll()) {
+            if (poller.fifo(.stdout).count > max_output_bytes)
+                return error.StdoutStreamTooLong;
+            if (poller.fifo(.stderr).count > max_output_bytes)
+                return error.StderrStreamTooLong;
+        }
+
+        stdout.* = fifoToOwnedArrayList(poller.fifo(.stdout));
+        stderr.* = fifoToOwnedArrayList(poller.fifo(.stderr));
+    }
+
+    pub const RunError = std.os.GetCwdError || std.os.ReadError || SpawnError || std.os.PollError || error{
+        StdoutStreamTooLong,
+        StderrStreamTooLong,
+    };
+
+    /// Spawns a child process, waits for it, collecting stdout and stderr, and then returns.
+    /// If it succeeds, the caller owns result.stdout and result.stderr memory.
+    pub fn run(args: struct {
+        allocator: std.mem.Allocator,
+        argv: []const []const u8,
+        cwd: ?[]const u8 = null,
+        cwd_dir: ?std.fs.Dir = null,
+        env_map: ?*const std.process.EnvMap = null,
+        max_output_bytes: usize = 50 * 1024,
+        expand_arg0: Arg0Expand = .no_expand,
+    }) RunError!RunResult {
+        var child = ChildProcess.init(args.argv, args.allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        child.cwd = args.cwd;
+        child.cwd_dir = args.cwd_dir;
+        child.env_map = args.env_map;
+        child.expand_arg0 = args.expand_arg0;
+
+        var stdout = std.ArrayList(u8).init(args.allocator);
+        var stderr = std.ArrayList(u8).init(args.allocator);
+        errdefer {
+            stdout.deinit();
+            stderr.deinit();
+        }
+
+        try child.spawn();
+        try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
+
+        return RunResult{
+            .term = try child.wait(),
+            .stdout = try stdout.toOwnedSlice(),
+            .stderr = try stderr.toOwnedSlice(),
+        };
+    }
+
+    fn waitPosix(self: *ChildProcess) !Term {
+        if (self.term) |term| {
+            self.cleanupStreams();
+            return term;
+        }
+
+        try self.waitUnwrapped();
+        return self.term.?;
+    }
+
+    fn waitUnwrapped(self: *ChildProcess) !void {
+        const res: std.os.WaitPidResult = res: {
+            if (self.request_resource_usage_statistics) {
+                switch (builtin.os.tag) {
+                    .linux, .macos, .ios => {
+                        var ru: std.os.rusage = undefined;
+                        const res = std.os.wait4(self.id, 0, &ru);
+                        self.resource_usage_statistics.rusage = ru;
+                        break :res res;
+                    },
+                    else => {},
+                }
+            }
+
+            break :res std.os.waitpid(self.id, 0);
+        };
+        const status = res.status;
+        self.cleanupStreams();
+        self.handleWaitResult(status);
+    }
+
+    fn handleWaitResult(self: *ChildProcess, status: u32) void {
+        self.term = self.cleanupAfterWait(status);
+    }
+
+    fn cleanupStreams(self: *ChildProcess) void {
+        if (self.stdin) |*stdin| {
+            stdin.close();
+            self.stdin = null;
+        }
+        if (self.stdout) |*stdout| {
+            stdout.close();
+            self.stdout = null;
+        }
+        if (self.stderr) |*stderr| {
+            stderr.close();
+            self.stderr = null;
+        }
+    }
+
+    fn cleanupAfterWait(self: *ChildProcess, status: u32) !Term {
+        if (self.err_pipe) |err_pipe| {
+            defer destroyPipe(err_pipe);
+
+            if (builtin.os.tag == .linux) {
+                var fd = [1]std.os.pollfd{std.os.pollfd{
+                    .fd = err_pipe[0],
+                    .events = std.os.POLL.IN,
+                    .revents = undefined,
+                }};
+
+                // Check if the eventfd buffer stores a non-zero value by polling
+                // it, that's the error code returned by the child process.
+                _ = std.os.poll(&fd, 0) catch unreachable;
+
+                // According to eventfd(2) the descriptor is readable if the counter
+                // has a value greater than 0
+                if ((fd[0].revents & std.os.POLL.IN) != 0) {
+                    const err_int = try readIntFd(err_pipe[0]);
+                    return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
+                }
+            } else {
+                // Write maxInt(ErrInt) to the write end of the err_pipe. This is after
+                // waitpid, so this write is guaranteed to be after the child
+                // pid potentially wrote an error. This way we can do a blocking
+                // read on the error pipe and either get maxInt(ErrInt) (no error) or
+                // an error code.
+                try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
+                const err_int = try readIntFd(err_pipe[0]);
+                // Here we potentially return the fork child's error from the parent
+                // pid.
+                if (err_int != std.math.maxInt(ErrInt)) {
+                    return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
+                }
+            }
+        }
+
+        return statusToTerm(status);
+    }
+
+    fn statusToTerm(status: u32) Term {
+        return if (std.os.W.IFEXITED(status))
+            Term{ .Exited = std.os.W.EXITSTATUS(status) }
+        else if (std.os.W.IFSIGNALED(status))
+            Term{ .Signal = std.os.W.TERMSIG(status) }
+        else if (std.os.W.IFSTOPPED(status))
+            Term{ .Stopped = std.os.W.STOPSIG(status) }
+        else
+            Term{ .Unknown = status };
+    }
+
+    fn spawnPosix(self: *ChildProcess) SpawnError!void {
+        const pipe_flags = if (std.io.is_async) std.os.O.NONBLOCK else 0;
+        const stdin_pipe = if (self.stdin_behavior == StdIo.Pipe) try std.os.pipe2(pipe_flags) else undefined;
+        errdefer if (self.stdin_behavior == StdIo.Pipe) {
+            destroyPipe(stdin_pipe);
+        };
+
+        const stdout_pipe = if (self.stdout_behavior == StdIo.Pipe) try std.os.pipe2(pipe_flags) else undefined;
+        errdefer if (self.stdout_behavior == StdIo.Pipe) {
+            destroyPipe(stdout_pipe);
+        };
+
+        const stderr_pipe = if (self.stderr_behavior == StdIo.Pipe) try std.os.pipe2(pipe_flags) else undefined;
+        errdefer if (self.stderr_behavior == StdIo.Pipe) {
+            destroyPipe(stderr_pipe);
+        };
+
+        const any_ignore = (self.stdin_behavior == StdIo.Ignore or self.stdout_behavior == StdIo.Ignore or self.stderr_behavior == StdIo.Ignore);
+        const dev_null_fd = if (any_ignore)
+            std.os.openZ("/dev/null", std.os.O.RDWR, 0) catch |err| switch (err) {
+                error.PathAlreadyExists => unreachable,
+                error.NoSpaceLeft => unreachable,
+                error.FileTooBig => unreachable,
+                error.DeviceBusy => unreachable,
+                error.FileLocksNotSupported => unreachable,
+                error.BadPathName => unreachable, // Windows-only
+                error.InvalidHandle => unreachable, // WASI-only
+                error.WouldBlock => unreachable,
+                error.NetworkNotFound => unreachable, // Windows-only
+                else => |e| return e,
+            }
+        else
+            undefined;
+        defer {
+            if (any_ignore) std.os.close(dev_null_fd);
+        }
+
+        var arena_allocator = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_allocator.deinit();
+        const arena = arena_allocator.allocator();
+
+        // The POSIX standard does not allow malloc() between fork() and execve(),
+        // and `self.allocator` may be a libc allocator.
+        // I have personally observed the child process deadlocking when it tries
+        // to call malloc() due to a heap allocation between fork() and execve(),
+        // in musl v1.1.24.
+        // Additionally, we want to reduce the number of possible ways things
+        // can fail between fork() and execve().
+        // Therefore, we do all the allocation for the execve() before the fork().
+        // This means we must do the null-termination of argv and env vars here.
+        const argv_buf = try arena.allocSentinel(?[*:0]const u8, self.argv.len, null);
+        for (self.argv, 0..) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
+
+        const envp = m: {
+            if (self.env_map) |env_map| {
+                const envp_buf = try createNullDelimitedEnvMap(arena, env_map);
+                break :m envp_buf.ptr;
+            } else if (builtin.link_libc) {
+                break :m std.c.environ;
+            } else if (builtin.output_mode == .Exe) {
+                // Then we have Zig start code and this works.
+                // TODO type-safety for null-termination of `os.environ`.
+                break :m @as([*:null]const ?[*:0]const u8, @ptrCast(std.os.environ.ptr));
+            } else {
+                // TODO come up with a solution for this.
+                @compileError("missing std lib enhancement: ChildProcess implementation has no way to collect the environment variables to forward to the child process");
+            }
+        };
+
+        // This pipe is used to communicate errors between the time of fork
+        // and execve from the child process to the parent process.
+        const err_pipe = blk: {
+            if (builtin.os.tag == .linux) {
+                const fd = try std.os.eventfd(0, std.os.linux.EFD.CLOEXEC);
+                // There's no distinction between the readable and the writeable
+                // end with eventfd
+                break :blk [2]std.os.fd_t{ fd, fd };
+            } else {
+                break :blk try std.os.pipe2(std.os.O.CLOEXEC);
+            }
+        };
+        errdefer destroyPipe(err_pipe);
+
+        const pid_result = try std.os.fork();
+        if (pid_result == 0) {
+            // we are the child
+            setUpChildIo(self.stdin_behavior, stdin_pipe[0], std.os.STDIN_FILENO, dev_null_fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            setUpChildIo(self.stdout_behavior, stdout_pipe[1], std.os.STDOUT_FILENO, dev_null_fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            setUpChildIo(self.stderr_behavior, stderr_pipe[1], std.os.STDERR_FILENO, dev_null_fd) catch |err| forkChildErrReport(err_pipe[1], err);
+
+            if (self.stdin_behavior == .Pipe) {
+                std.os.close(stdin_pipe[0]);
+                std.os.close(stdin_pipe[1]);
+            }
+            if (self.stdout_behavior == .Pipe) {
+                std.os.close(stdout_pipe[0]);
+                std.os.close(stdout_pipe[1]);
+            }
+            if (self.stderr_behavior == .Pipe) {
+                std.os.close(stderr_pipe[0]);
+                std.os.close(stderr_pipe[1]);
+            }
+
+            if (self.cwd_dir) |cwd| {
+                std.os.fchdir(cwd.fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            } else if (self.cwd) |cwd| {
+                std.os.chdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
+            }
+
+            if (self.gid) |gid| {
+                std.os.setregid(gid, gid) catch |err| forkChildErrReport(err_pipe[1], err);
+            }
+
+            if (self.uid) |uid| {
+                std.os.setreuid(uid, uid) catch |err| forkChildErrReport(err_pipe[1], err);
+            }
+
+            const err = switch (self.expand_arg0) {
+                .expand => std.os.execvpeZ_expandArg0(.expand, argv_buf.ptr[0].?, argv_buf.ptr, envp),
+                .no_expand => std.os.execvpeZ_expandArg0(.no_expand, argv_buf.ptr[0].?, argv_buf.ptr, envp),
+            };
+            forkChildErrReport(err_pipe[1], err);
+        }
+
+        // we are the parent
+        const pid = @as(i32, @intCast(pid_result));
+        if (self.stdin_behavior == StdIo.Pipe) {
+            self.stdin = std.fs.File{ .handle = stdin_pipe[1] };
+        } else {
+            self.stdin = null;
+        }
+        if (self.stdout_behavior == StdIo.Pipe) {
+            self.stdout = std.fs.File{ .handle = stdout_pipe[0] };
+        } else {
+            self.stdout = null;
+        }
+        if (self.stderr_behavior == StdIo.Pipe) {
+            self.stderr = std.fs.File{ .handle = stderr_pipe[0] };
+        } else {
+            self.stderr = null;
+        }
+
+        self.id = pid;
+        self.err_pipe = err_pipe;
+        self.term = null;
+
+        if (self.stdin_behavior == StdIo.Pipe) {
+            std.os.close(stdin_pipe[0]);
+        }
+        if (self.stdout_behavior == StdIo.Pipe) {
+            std.os.close(stdout_pipe[1]);
+        }
+        if (self.stderr_behavior == StdIo.Pipe) {
+            std.os.close(stderr_pipe[1]);
+        }
+    }
+
+    fn setUpChildIo(stdio: StdIo, pipe_fd: i32, std_fileno: i32, dev_null_fd: i32) !void {
+        switch (stdio) {
+            .Pipe => try std.os.dup2(pipe_fd, std_fileno),
+            .Close => std.os.close(std_fileno),
+            .Inherit => {},
+            .Ignore => try std.os.dup2(dev_null_fd, std_fileno),
+        }
+    }
+};
+
+fn destroyPipe(pipe: [2]std.os.fd_t) void {
+    std.os.close(pipe[0]);
+    if (pipe[0] != pipe[1]) std.os.close(pipe[1]);
+}
+
+// Child of fork calls this to report an error to the fork parent.
+// Then the child exits.
+fn forkChildErrReport(fd: i32, err: SpawnError) noreturn {
+    writeIntFd(fd, @as(ErrInt, @intFromError(err))) catch {};
+    // If we're linking libc, some naughty applications may have registered atexit handlers
+    // which we really do not want to run in the fork child. I caught LLVM doing this and
+    // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
+    // "Why'd you have to go and make things so complicated?"
+    if (builtin.link_libc) {
+        // The _exit(2) function does nothing but make the exit syscall, unlike exit(3)
+        std.c._exit(1);
+    }
+    std.os.exit(1);
+}
+
+const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
+
+fn writeIntFd(fd: i32, value: ErrInt) !void {
+    const file = std.fs.File{
+        .handle = fd,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
+    };
+    file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
+}
+
+fn readIntFd(fd: i32) !ErrInt {
+    const file = std.fs.File{
+        .handle = fd,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
+    };
+    return @as(ErrInt, @intCast(file.reader().readInt(u64, .little) catch return error.SystemResources));
+}
+
+pub fn createNullDelimitedEnvMap(arena: std.mem.Allocator, env_map: *const std.process.EnvMap) ![:null]?[*:0]u8 {
+    const envp_count = env_map.count();
+    const envp_buf = try arena.allocSentinel(?[*:0]u8, envp_count, null);
+    {
+        var it = env_map.iterator();
+        var i: usize = 0;
+        while (it.next()) |pair| : (i += 1) {
+            const env_buf = try arena.allocSentinel(u8, pair.key_ptr.len + pair.value_ptr.len + 1, 0);
+            @memcpy(env_buf[0..pair.key_ptr.len], pair.key_ptr.*);
+            env_buf[pair.key_ptr.len] = '=';
+            @memcpy(env_buf[pair.key_ptr.len + 1 ..][0..pair.value_ptr.len], pair.value_ptr.*);
+            envp_buf[i] = env_buf.ptr;
+        }
+        std.debug.assert(i == envp_count);
+    }
+    return envp_buf;
 }
 
 fn _toOwnedSlice(comptime T: type, allocator: std.mem.Allocator, src: []const T) anyerror![]T {
@@ -402,56 +847,7 @@ fn _testIsError(comptime T: type, maybe_value: anyerror!T, expected_error: anyer
 
 // all tests
 
-test "single cmd test" {
-    const allocator = std.testing.allocator;
-    {
-        const result = runCommandAndGetResult(.{
-            .allocator = allocator,
-            .command = &[_][]const u8{ "uname", "-a" },
-        }, "test uname -a");
-        defer result.deinit();
-        try testing.expect(result.stdout.len > 0);
-        try testing.expect(result.stderr.len == 0);
-    }
-    {
-        const result = runCommandAndGetResult(.{
-            .allocator = allocator,
-            .command = &[_][]const u8{ "bash", "./tests/witherr_exit_zero.sh" },
-        }, "test witherr_exit_zero.sh");
-        defer result.deinit();
-        try testing.expect(result.stdout.len == 0);
-        try testing.expect(result.stderr.len > 0);
-    }
-    {
-        const result = runCommandAndGetResult(.{
-            .allocator = allocator,
-            .command = &[_][]const u8{ "uname", "-a" },
-            .trim_stdout = false,
-            .trim_stderr = false,
-        }, "test uname -a, no trim");
-        defer result.deinit();
-        try testing.expect(result.stdout.len > 0);
-        try testing.expect(result.stderr.len == 0);
-    }
-    {
-        const inputs = try std.fs.cwd().readFileAlloc(allocator, "tests/big_input.txt", MAX_OUTPUT);
-        defer allocator.free(inputs);
-        const result = try runCommandAndGetResultErr(.{
-            .allocator = allocator,
-            .command = &[_][]const u8{ "sort", "-n" },
-            .stdin_input = inputs,
-        });
-        defer {
-            allocator.free(result.stdout);
-            allocator.free(result.stderr);
-        }
-        try testing.expect(result.term.Exited == 0);
-        try testing.expect(result.stdout.len > 0);
-        try testing.expect(result.stderr.len == 0);
-    }
-}
-
-test "pipe cmd test" {
+test "default" {
     const allocator = std.testing.allocator;
     // {
     //     const result = try runChainedCommandsAndGetResultErr(.{
@@ -483,29 +879,11 @@ test "pipe cmd test" {
     //     try testing.expect(result.stderr.len == 0);
     // }
     {
-        const maybe_result = runChainedCommandsAndGetResultErr(.{
+        const result = try runCommandsErr(.{
             .allocator = allocator,
             .commands = &[_][]const []const u8{
                 &.{ "cat", "./tests/big_input.txt" },
-                &.{ "sort-of", "-nr" },
-                &.{"head"},
             },
-        });
-        // std.debug.print("\n{any}\n", .{maybe_result});
-        try testing.expect(_testIsError(
-            std.ChildProcess.RunResult,
-            maybe_result,
-            error.FileNotFound,
-        ));
-    }
-    {
-        const result = try runChainedCommandsAndGetResultErr(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"notexist.sh"},
-                &.{ "uname", "-a" },
-            },
-            .stop_on_any_error = false,
         });
         defer {
             allocator.free(result.stdout);
@@ -514,6 +892,22 @@ test "pipe cmd test" {
         try testing.expect(result.stdout.len > 0);
         try testing.expect(result.stderr.len == 0);
     }
+    // {
+    //     const result = try runChainedCommandsAndGetResultErr(.{
+    //         .allocator = allocator,
+    //         .commands = &[_][]const []const u8{
+    //             &.{"notexist.sh"},
+    //             &.{ "uname", "-a" },
+    //         },
+    //         .stop_on_any_error = false,
+    //     });
+    //     defer {
+    //         allocator.free(result.stdout);
+    //         allocator.free(result.stderr);
+    //     }
+    //     try testing.expect(result.stdout.len > 0);
+    //     try testing.expect(result.stderr.len == 0);
+    // }
     // {
     //     var result = runChainedCommandAndGetResult(.{
     //         .allocator = allocator,
