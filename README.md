@@ -75,7 +75,7 @@ try testing.expectEqualSlices(
 use following bash in your project folder (with `build.zig.zon`)
 
 ```
-zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.1.0.tar.gz
+zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.2.0.tar.gz
 ```
 
 you can change the version `v0.1.0` to other version if there are in [release](https://github.com/liyu1981/zcmd.zig/releases) page.
