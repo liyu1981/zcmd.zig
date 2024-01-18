@@ -33,8 +33,9 @@ pub const Term = union(enum) {
 };
 
 pub const ZcmdError = error{
-    OutOfMemory,
+    StdoutStreamTooLong,
 
+    OutOfMemory,
     CorruptPasswordFile,
     UserNotFound,
 } ||
@@ -154,6 +155,18 @@ pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
         // listen to forked child (pipeline), get its stdout,stderr,err incase there is problem
         // feed stdin_input if there is
 
+        errdefer {
+            // make sure that we terminate pipeline process if return from error
+            std.os.kill(pid_result, std.os.SIG.TERM) catch |err| switch (err) {
+                // if already gone, let it be
+                error.ProcessNotFound => {},
+                else => {
+                    // otherwise Cool Guys Don't Look At Explosions
+                    std.os.kill(pid_result, std.os.SIG.KILL) catch {};
+                },
+            };
+        }
+
         if (has_stdin_pipe) {
             std.os.close(stdin_pipe[0]);
         }
@@ -169,7 +182,12 @@ pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
             .stderr = std.fs.File{ .handle = stderr_pipe[0] },
         });
         defer poller.deinit();
-        while (try poller.poll()) {}
+        while (try poller.poll()) {
+            if (poller.fifo(.stdout).count > args.max_output_bytes)
+                return error.StdoutStreamTooLong;
+            if (poller.fifo(.stderr).count > args.max_output_bytes)
+                return error.StdoutStreamTooLong;
+        }
         var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
         var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
 
@@ -584,7 +602,11 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(u8, result.stdout.?, "       0       0\n");
+        try testing.expectEqualSlices(
+            u8,
+            result.stdout.?,
+            "       0       0\n",
+        );
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
@@ -600,7 +622,11 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(u8, result.stdout.?, "       0       0\n");
+        try testing.expectEqualSlices(
+            u8,
+            result.stdout.?,
+            "       0       0\n",
+        );
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
@@ -616,11 +642,25 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(u8, result.stdout.?, "       0       0\n");
+        try testing.expectEqualSlices(
+            u8,
+            result.stdout.?,
+            "       0       0\n",
+        );
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
             "find: nonexist: No such file or directory\n",
         );
+    }
+    {
+        const maybe_result = Zcmd.run(.{
+            .allocator = allocator,
+            .commands = &[_][]const []const u8{
+                &.{ "cat", "./tests/big_input.txt" },
+            },
+            .max_output_bytes = 1_000,
+        });
+        try testing.expect(_testIsError(RunResult, maybe_result, error.StdoutStreamTooLong));
     }
 }
