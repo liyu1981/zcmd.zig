@@ -17,7 +17,7 @@
     .dependencies = .{
         // refresh this part with `zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.2.0.tar.gz`
         .zcmd = .{
-            .url = "../zcmd",
+            .url = "https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.2.0.tar.gz",
             .hash = "1220bb5963c28e563ed010e5d622611ec0cb711ba8c6644ab44a22955957b1b8fe1a",
         },
     },
