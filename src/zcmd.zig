@@ -64,7 +64,7 @@ pub const RunResult = struct {
 
 const Zcmd = @This();
 
-const ZcmdArgs = struct {
+pub const ZcmdArgs = struct {
     allocator: std.mem.Allocator,
     commands: []const []const []const u8,
     stdin_input: ?[]const u8 = null,
@@ -78,6 +78,50 @@ const ZcmdArgs = struct {
     expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 };
 
+/// provides an almost identical API like `std.childProcess.run`, but with the ability of running pipeline like `bash`.
+/// Example like execution of single command (replacement of zig's `std.childProcess.run`)
+///
+/// ```zig
+/// const result = try Zcmd.run(.{
+///     .allocator = allocator,
+///     .commands = &[_][]const []const u8{
+///         &.{ "uname", "-a" },
+///     },
+/// });
+/// ```
+///
+/// the differences to `std.childProcess.run` is it will take `commands` instead of single `command`.
+///
+/// It can run a `bash` like pipeline like follows (_to recursively find and list the latest modified files in a
+/// directory with subdirectories and times_)
+///
+/// ```zig
+/// const result = try Zcmd.run(.{
+///     .allocator = allocator,
+///     .commands = &[_][]const []const u8{
+///         &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
+///         &.{ "sort", "-nr" },
+///         &.{ "head", "-1" },
+///     },
+/// });
+/// ```
+///
+/// It can also accept an input from outside as stdin to command or command pipeline, like follows
+///
+/// ```zig
+/// const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
+/// defer f.close();
+/// const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
+/// defer allocator.free(content);
+/// const result = try Zcmd.run(.{
+///     .allocator = allocator,
+///     .commands = &[_][]const []const u8{
+///         &.{"cat"},
+///         &.{ "wc", "-lw" },
+///     },
+///     .stdin_input = content,
+/// });
+/// ```
 pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
     const pipe_flags = 0;
     var has_stdin_pipe: bool = false;
@@ -256,7 +300,7 @@ fn _feedStdinInput(fd: std.os.system.fd_t, stdin_input: []const u8) !void {
     stdin.close();
 }
 
-pub fn _run(args: ZcmdArgs) !void {
+fn _run(args: ZcmdArgs) !void {
     // here we create a pipe then fork a copy of ourself, but instead of executing command, we do it in parent, and
     // let child to prepare for next environment. Using an example command pipelien
     // `cat ./tests/big_input.txt | wc -lw | wc-lw`, we will

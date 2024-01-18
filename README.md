@@ -91,4 +91,6 @@ find what apis `zcmd.zig` provides.
 
 ## Coverage
 
-`zcmd.zig` is rigorously tested and my goal is to reach 100%. Visit the coverage report here: https://liyu1981.github.io/zcmd.zig/kcov/index.html
+`zcmd.zig` is rigorously tested. Run unit tests at repo checkout root folder with `zig test src/zcmd.zig`.
+
+For coverage test, as `kcov` is working in a way of 'debug every line and record', it can not work with `zcmd` tests. `zcmd` tests will fork many sub processes and if one of them be stopped the whole pipeline hangs. I am still in searching of what's the best method to cover.
