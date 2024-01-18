@@ -1,50 +1,72 @@
 # zcmd.zig
 
-`zcmd` is a single file lib (`zcmd.zig`) to wrap `std.childProcess` for easier execution of external programs, or pipe
-of external programs.
+`zcmd` is a single file lib (`zcmd.zig`) to replace zig's `std.childProcess.run`. It has almost identical API like `std.childProcess.run`, but with the ability of running pipeline like `bash`.
 
-Example like execution of simple commands
+Example like execution of single command (replacement of zig's `std.childProcess.run`)
 
 ```zig
-const result = runCommandAndGetResult(.{
+const result = try Zcmd.run(.{
     .allocator = allocator,
-    .command = &[_][]const u8{ "uname", "-a" },
-}, "test uname -a");
+    .commands = &[_][]const []const u8{
+        &.{ "uname", "-a" },
+    },
+});
 ```
 
-or using several simple commands piped to each other for complex jobs (just like in bash)
+the differences to `std.childProcess.run` is it will take `commands` instead of single `command`.
+
+It can run a `bash` like pipeline like follows (_to recursively find and list the latest modified files in a directory with subdirectories and times_)
 
 ```zig
-var result = runPipedCommandAndGetResult(.{
+const result = try Zcmd.run(.{
     .allocator = allocator,
     .commands = &[_][]const []const u8{
         &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
         &.{ "sort", "-nr" },
-        &.{"head"},
+        &.{ "head", "-1" },
     },
-}, "recursively find and list the latest modified files in a directory with subdirectories and times");
-```
-
-`zcmd` provides 2 flavors of functions, with suffix `Err` apis will generally return error when found it, and without
-suffix `Err` apis will not return error and try best to just return result, or `@panic` if something bad happens.
-The former ones is suitable for dynamic commands execution (as can nov valid before execution), and the latter ones is
-suitable for fixed commands execution (like in scripts).
-
-`zcmd`'s api also introduced `stop_on_any_error` and `stop_on_any_stderr` options for control of piped commands flow a
-bit. Like in following example
-
-```zig
-const result = try runPipedCommandsAndGetResultErr(.{
-    .allocator = allocator,
-    .commands = &[_][]const []const u8{
-        &.{"./tests/exit_sigabrt"},
-        &.{ "uname", "-a" },
-    },
-    .stop_on_any_error = false,
 });
 ```
 
-We will be able to get the second "uname -a" result even that the first command will fail.
+It can also accept an input from outside as stdin to command or command pipeline, like follows
+
+```zig
+const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
+defer f.close();
+const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
+defer allocator.free(content);
+const result = try Zcmd.run(.{
+    .allocator = allocator,
+    .commands = &[_][]const []const u8{
+        &.{"cat"},
+        &.{ "wc", "-lw" },
+    },
+    .stdin_input = content,
+});
+```
+
+When there is something failed inside pipeline, we will report back `stdout` and `stderr` just like `bash`, like below example
+
+```zig
+const result = try Zcmd.run(.{
+    .allocator = allocator,
+    .commands = &[_][]const []const u8{
+        &.{ "find", "nonexist" },
+        &.{ "wc", "-lw" },
+    },
+});
+defer result.deinit();
+try testing.expectEqualSlices(
+    u8,
+    result.stdout.?,
+    "       0       0\n",
+);
+try testing.expectEqualSlices(
+    u8,
+    result.stderr.?,
+    "find: nonexist: No such file or directory\n",
+);
+```
 
 ## Usage
 

@@ -474,6 +474,18 @@ test "normal cases" {
         );
     }
     {
+        const result = try Zcmd.run(.{
+            .allocator = allocator,
+            .commands = &[_][]const []const u8{
+                &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
+                &.{ "sort", "-nr" },
+                &.{ "head", "-1" },
+            },
+        });
+        defer result.deinit();
+        try testing.expect(result.stdout.?.len > 0);
+    }
+    {
         const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
         defer f.close();
         const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
