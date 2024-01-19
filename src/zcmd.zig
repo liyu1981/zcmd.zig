@@ -81,25 +81,27 @@ pub const RunResult = struct {
     }
 
     pub fn assertSucceeded(this: *const RunResult, opts: AssertOptions) !void {
+        _ = try this._assertSucceededBool(opts);
+    }
+
+    fn _assertSucceededBool(this: *const RunResult, opts: AssertOptions) !bool {
         const failed: bool = brk: {
             if (this.term.Exited != 0) break :brk true;
             if (opts.check_stdout_not_empty_raw) {
                 if (this.stdout == null) break :brk true;
                 if (this.stdout.?.len == 0) break :brk true;
             }
-            if (opts.check_stderr_empty) {
+            if (!opts.check_stdout_not_empty_raw and opts.check_stdout_not_empty) {
                 if (this.stdout == null) break :brk true;
                 if (this.stdout) |so| {
                     const trimed = std.mem.trim(u8, so, WHITE_SPACES);
                     if (trimed.len == 0) break :brk true;
                 }
             }
-            if (opts.check_stdout_not_empty_raw) {
-                if (this.stderr == null) break :brk true;
-                if (this.stderr.?.len > 0) break :brk true;
+            if (opts.check_stderr_empty_raw) {
+                if (this.stderr) |se| if (se.len > 0) break :brk true;
             }
-            if (opts.check_stderr_empty) {
-                if (this.stderr == null) break :brk true;
+            if (!opts.check_stderr_empty_raw and opts.check_stderr_empty) {
                 if (this.stderr) |se| {
                     const trimed = std.mem.trim(u8, se, WHITE_SPACES);
                     if (trimed.len > 0) break :brk true;
@@ -109,22 +111,28 @@ pub const RunResult = struct {
         };
 
         if (failed) {
-            const stderr_writer = std.io.getStdErr().writer();
-            try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
-            try stderr_writer.print(
-                ">> Term: {any}\n>> stdout:\n{?s}\n>> stderr:\n{?s}\n",
-                .{
-                    this.term,
-                    this.stdout,
-                    this.stderr,
-                },
-            );
+            if (!builtin.is_test) {
+                const stderr_writer = std.io.getStdErr().writer();
+                try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
+                try stderr_writer.print(
+                    ">> Term: {any}\n>> stdout({d}bytes):\n{?s}\n>> stderr({d}bytes):\n{?s}\n",
+                    .{
+                        this.term,
+                        if (this.stdout == null) 0 else this.stdout.?.len,
+                        this.stdout,
+                        if (this.stderr == null) 0 else this.stderr.?.len,
+                        this.stderr,
+                    },
+                );
+            }
             if (opts.do_panic) {
                 @panic("assert command succeeded failed!");
             } else {
                 return ZcmdError.FailedAssertSucceeded;
             }
         }
+
+        return true;
     }
 
     pub fn trimedStdout(this: *const RunResult) []const u8 {
@@ -823,5 +831,60 @@ test "all failures" {
             .max_output_bytes = 1_000,
         });
         try testing.expect(_testIsError(RunResult, maybe_result, error.StdoutStreamTooLong));
+    }
+}
+
+test "RunResult" {
+    const allocator = testing.allocator;
+    // std.debug.print("\nstdout: {d}bytes: {?s}\n", .{ if (result.stdout == null) 0 else result.stdout.?.len, result.stdout.? });
+    // std.debug.print("\nstderr: {d}bytes: {?s}\n", .{ if (result.stderr == null) 0 else result.stderr.?.len, result.stderr.? });
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "uname", "-a" },
+        });
+        defer result.deinit();
+        try result.assertSucceeded(.{});
+        try result.assertSucceeded(.{ .check_stderr_empty = true });
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "echo", "-n" },
+        });
+        defer result.deinit();
+        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{}), ZcmdError.FailedAssertSucceeded));
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{"echo"},
+        });
+        defer result.deinit();
+        try result.assertSucceeded(.{ .check_stdout_not_empty_raw = true });
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "echo", "-n", "hello" },
+        });
+        defer result.deinit();
+        try result.assertSucceeded(.{ .check_stderr_empty_raw = true });
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "find", "nonexist" },
+        });
+        defer result.deinit();
+        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "bash", "tests/witherr_exit_zero.sh" },
+        });
+        defer result.deinit();
+        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
     }
 }
