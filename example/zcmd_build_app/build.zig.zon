@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.12.0",
     .dependencies = .{
         .zcmd = .{
-            .url = "../../",
-            .hash = "122048203fded321603b8b06847a5f02f42c6f152e49b0cf4f65aef4d8157aad7d48",
+            .url = "https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.2.1.tar.gz",
+            .hash = "12205fcefca40ebba6532df464b3f234a25097b3ce9b6a904250d8f84582b62dbc2d",
         },
     },
     .paths = .{

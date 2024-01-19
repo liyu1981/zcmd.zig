@@ -9,5 +9,6 @@ pub fn main() !void {
         .commands = &[_][]const []const u8{&.{ "uname", "-a" }},
     });
     defer result.deinit();
-    try stdout.print("==== stdout ====\n{?s}\n", .{result.stdout});
+    result.assertSucceededPanic(.{});
+    try stdout.print("==== stdout ====\n{?s}\n", .{result.trimedStdout()});
 }
