@@ -68,6 +68,22 @@ try testing.expectEqualSlices(
 );
 ```
 
+Please check [example/zcmd_app](https://github.com/liyu1981/zcmd.zig/tree/main/example/zcmd_app) for an example on how to use `zcmd.zig`.
+
+### use `zcmd.zig` in `build.zig`
+
+Originally `zcmd.zig` is functions I wrote in `build.zig` to auto generating files with commands, so it is important that can use this in `build.zig`. So `zcmd.zig` exposed itself for `build.zig` too.
+
+To use that we will need to normally introduce `zcmd.zig` to `build.zig.zon` (see Usage below). Then in your `build.zig`, do following to use it
+
+```zig
+// when import in build.zig, the zcmd is exposed in nested const zcmd
+const zcmd = @import("zcmd").zcmd;
+// then next can use zcmd.run as above
+```
+
+Please check [example/zcmd_build_app](https://github.com/liyu1981/zcmd.zig/tree/main/example/zcmd_build_app) for detail version how to use in this way.
+
 ## Usage
 
 ### through Zig Package Manager

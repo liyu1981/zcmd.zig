@@ -5,6 +5,7 @@ tests/exit_stop
 tests/exit_unknown
 tests/wait_test
 cov/
+example/zcmd_build_app/src/build_generated.zig
 
 # Created by https://www.toptal.com/developers/gitignore/api/zig,macos
 # Edit at https://www.toptal.com/developers/gitignore?templates=zig,macos

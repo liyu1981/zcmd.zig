@@ -33,6 +33,8 @@ pub const Term = union(enum) {
 };
 
 pub const ZcmdError = error{
+    FailedAssertSucceeded,
+
     StdoutStreamTooLong,
 
     OutOfMemory,
@@ -50,8 +52,19 @@ pub const ZcmdError = error{
     std.os.ShutdownError;
 
 pub const RunResult = struct {
+    const WHITE_SPACES = " \t\n\r";
+
+    const AssertOptions = struct {
+        check_stdout_not_empty: bool = true,
+        check_stdout_not_empty_raw: bool = false,
+        check_stderr_empty: bool = true,
+        check_stderr_empty_raw: bool = false,
+        do_panic: bool = false,
+    };
+
     allocator: std.mem.Allocator,
 
+    args: ZcmdArgs,
     term: Term = undefined,
     stdout: ?[]const u8 = null,
     stderr: ?[]const u8 = undefined,
@@ -59,6 +72,67 @@ pub const RunResult = struct {
     pub fn deinit(this: *const RunResult) void {
         if (this.stdout) |stdout_slice| this.allocator.free(stdout_slice);
         if (this.stderr) |stderr_slice| this.allocator.free(stderr_slice);
+    }
+
+    pub fn assertSucceededPanic(this: *const RunResult, opts: AssertOptions) void {
+        var _opts = opts;
+        _opts.do_panic = true;
+        this.assertSucceeded(_opts) catch {};
+    }
+
+    pub fn assertSucceeded(this: *const RunResult, opts: AssertOptions) !void {
+        const failed: bool = brk: {
+            if (this.term.Exited != 0) break :brk true;
+            if (opts.check_stdout_not_empty_raw) {
+                if (this.stdout == null) break :brk true;
+                if (this.stdout.?.len == 0) break :brk true;
+            }
+            if (opts.check_stderr_empty) {
+                if (this.stdout == null) break :brk true;
+                if (this.stdout) |so| {
+                    const trimed = std.mem.trim(u8, so, WHITE_SPACES);
+                    if (trimed.len == 0) break :brk true;
+                }
+            }
+            if (opts.check_stdout_not_empty_raw) {
+                if (this.stderr == null) break :brk true;
+                if (this.stderr.?.len > 0) break :brk true;
+            }
+            if (opts.check_stderr_empty) {
+                if (this.stderr == null) break :brk true;
+                if (this.stderr) |se| {
+                    const trimed = std.mem.trim(u8, se, WHITE_SPACES);
+                    if (trimed.len > 0) break :brk true;
+                }
+            }
+            break :brk false;
+        };
+
+        if (failed) {
+            const stderr_writer = std.io.getStdErr().writer();
+            try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
+            try stderr_writer.print(
+                ">> Term: {any}\n>> stdout:\n{?s}\n>> stderr:\n{?s}\n",
+                .{
+                    this.term,
+                    this.stdout,
+                    this.stderr,
+                },
+            );
+            if (opts.do_panic) {
+                @panic("assert command succeeded failed!");
+            } else {
+                return ZcmdError.FailedAssertSucceeded;
+            }
+        }
+    }
+
+    pub fn trimedStdout(this: *const RunResult) []const u8 {
+        return std.mem.trim(u8, this.stdout.?, WHITE_SPACES);
+    }
+
+    pub fn trimedStderr(this: *const RunResult) []const u8 {
+        return std.mem.trim(u8, this.stderr.?, WHITE_SPACES);
     }
 };
 
@@ -251,11 +325,33 @@ pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
         const result = std.os.waitpid(pid_result, 0);
         return RunResult{
             .allocator = args.allocator,
+            .args = args,
             .term = Term.fromStatus(result.status),
             .stdout = try stdout_array.toOwnedSlice(),
             .stderr = try stderr_array.toOwnedSlice(),
         };
     }
+}
+
+/// provide runSingle with same args to `std.ChildProcess.run`. It is a thin wrapper to `run`.
+pub fn runSingle(args: struct {
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: ?[]const u8 = null,
+    cwd_dir: ?std.fs.Dir = null,
+    env_map: ?*const std.process.EnvMap = null,
+    max_output_bytes: usize = 50 * 1024,
+    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
+}) ZcmdError!RunResult {
+    return run(.{
+        .allocator = args.allocator,
+        .commands = &[_][]const []const u8{args.argv},
+        .cwd = args.cwd,
+        .cwd_dir = args.cwd_dir,
+        .env_map = args.env_map,
+        .max_output_bytes = args.max_output_bytes,
+        .expand_arg0 = args.expand_arg0,
+    });
 }
 
 fn _feedStdinInput(fd: std.os.system.fd_t, stdin_input: []const u8) !void {
@@ -643,6 +739,15 @@ test "normal cases" {
             result.stdout.?,
             "ZCMD_TEST_ENV1=hello\n",
         );
+    }
+    {
+        const result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "uname", "-a" },
+        });
+        defer result.deinit();
+        try testing.expectEqual(result.term.Exited, 0);
+        try testing.expect(result.stdout.?.len > 0);
     }
 }
 

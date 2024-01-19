@@ -1,1 +1,1 @@
-var modules =[{"name":"zcmd","file":0,"main":66,"table":{"zcmd":0,"builtin":2,"std":1}},{"name":"std","file":0,"main":67,"table":{}},{"name":"builtin","file":0,"main":32003,"table":{}}];
+var modules =[{"name":"zcmd","file":0,"main":66,"table":{"std":1,"zcmd":0,"builtin":2}},{"name":"std","file":0,"main":67,"table":{}},{"name":"builtin","file":0,"main":32003,"table":{}}];
