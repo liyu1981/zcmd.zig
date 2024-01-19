@@ -10,7 +10,7 @@ const OS_PAGE_SIZE = switch (builtin.os.tag) {
     },
 };
 
-pub const MAX_OUTPUT = 8 * 1024 * 1024 * 1024;
+const MAX_OUTPUT = 8 * 1024 * 1024 * 1024;
 
 pub const Term = union(enum) {
     Exited: u8,
@@ -204,7 +204,19 @@ pub const ZcmdArgs = struct {
 ///     .stdin_input = content,
 /// });
 /// ```
-pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
+pub fn run(args: struct {
+    allocator: std.mem.Allocator,
+    commands: []const []const []const u8,
+    stdin_input: ?[]const u8 = null,
+    user_name: ?[]const u8 = null,
+    uid: ?std.os.uid_t = null,
+    gid: ?std.os.uid_t = null,
+    cwd: ?[]const u8 = null,
+    cwd_dir: ?std.fs.Dir = null,
+    env_map: ?*const std.process.EnvMap = null,
+    max_output_bytes: usize = MAX_OUTPUT,
+    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
+}) ZcmdError!RunResult {
     const pipe_flags = 0;
     var has_stdin_pipe: bool = false;
     const stdin_pipe = brk: {
@@ -217,7 +229,19 @@ pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
     const stderr_pipe = try std.os.pipe2(pipe_flags);
     const err_pipe = try std.os.pipe2(pipe_flags);
 
-    var _args: ZcmdArgs = args;
+    var _args: ZcmdArgs = ZcmdArgs{
+        .allocator = args.allocator,
+        .commands = args.commands,
+        .stdin_input = args.stdin_input,
+        .user_name = args.user_name,
+        .uid = args.uid,
+        .gid = args.gid,
+        .cwd = args.cwd,
+        .cwd_dir = args.cwd_dir,
+        .env_map = args.env_map,
+        .max_output_bytes = args.max_output_bytes,
+        .expand_arg0 = args.expand_arg0,
+    };
 
     if (args.user_name != null and args.uid != null and args.gid != null) {
         @panic("set either user_name or uid+gid, not the same time!");
@@ -327,18 +351,44 @@ pub fn run(args: ZcmdArgs) ZcmdError!RunResult {
             return @as(ZcmdError, @errorCast(@errorFromInt(err_int)));
         }
 
-        // var stdout_f = std.fs.File{ .handle = stdout_pipe[0] };
-        // // defer std.os.close(stdout_pipe[0]);
-        // const out = try stdout_f.readToEndAlloc(allocator, MAX_OUTPUT);
         const result = std.os.waitpid(pid_result, 0);
         return RunResult{
             .allocator = args.allocator,
-            .args = args,
+            .args = _args,
             .term = Term.fromStatus(result.status),
             .stdout = try stdout_array.toOwnedSlice(),
             .stderr = try stderr_array.toOwnedSlice(),
         };
     }
+}
+
+/// a version of using `std.heap.page_allocator`, so no worry about bringing your allocator, just remember to
+/// `defer result.deinit()`
+pub fn runSelfManaged(args: struct {
+    commands: []const []const []const u8,
+    stdin_input: ?[]const u8 = null,
+    user_name: ?[]const u8 = null,
+    uid: ?std.os.uid_t = null,
+    gid: ?std.os.uid_t = null,
+    cwd: ?[]const u8 = null,
+    cwd_dir: ?std.fs.Dir = null,
+    env_map: ?*const std.process.EnvMap = null,
+    max_output_bytes: usize = MAX_OUTPUT,
+    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
+}) anyerror!RunResult {
+    return run(.{
+        .allocator = std.heap.page_allocator,
+        .commands = args.commands,
+        .stdin_input = args.stdin_input,
+        .user_name = args.user_name,
+        .uid = args.uid,
+        .gid = args.gid,
+        .cwd = args.cwd,
+        .cwd_dir = args.cwd_dir,
+        .env_map = args.env_map,
+        .max_output_bytes = args.max_output_bytes,
+        .expand_arg0 = args.expand_arg0,
+    });
 }
 
 /// provide runSingle with same args to `std.ChildProcess.run`. It is a thin wrapper to `run`.
@@ -756,6 +806,20 @@ test "normal cases" {
         defer result.deinit();
         try testing.expectEqual(result.term.Exited, 0);
         try testing.expect(result.stdout.?.len > 0);
+    }
+    {
+        const result = try Zcmd.runSelfManaged(.{
+            .commands = &[_][]const []const u8{
+                &.{ "cat", "./tests/big_input.txt" },
+                &.{ "wc", "-lw" },
+            },
+        });
+        defer result.deinit();
+        try testing.expectEqualSlices(
+            u8,
+            result.stdout.?,
+            "    1302    2604\n",
+        );
     }
 }
 
