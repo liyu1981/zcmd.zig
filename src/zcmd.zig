@@ -86,7 +86,10 @@ pub const RunResult = struct {
 
     fn _assertSucceededBool(this: *const RunResult, opts: AssertOptions) !bool {
         const failed: bool = brk: {
-            if (this.term.Exited != 0) break :brk true;
+            switch (this.term) {
+                .Exited => |ret| if (ret != 0) break :brk true else break :brk false,
+                else => break :brk true,
+            }
             if (opts.check_stdout_not_empty_raw) {
                 if (this.stdout == null) break :brk true;
                 if (this.stdout.?.len == 0) break :brk true;
