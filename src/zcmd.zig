@@ -59,6 +59,9 @@ pub const RunResult = struct {
         check_stdout_not_empty_raw: bool = false,
         check_stderr_empty: bool = true,
         check_stderr_empty_raw: bool = false,
+        print_cmd_term: bool = true,
+        print_stdout: bool = true,
+        print_stderr: bool = true,
         do_panic: bool = false,
     };
 
@@ -116,17 +119,22 @@ pub const RunResult = struct {
         if (failed) {
             if (!builtin.is_test) {
                 const stderr_writer = std.io.getStdErr().writer();
-                try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
-                try stderr_writer.print(
-                    ">> Term: {any}\n>> stdout({d}bytes):\n{?s}\n>> stderr({d}bytes):\n{?s}\n",
-                    .{
-                        this.term,
+                if (opts.print_cmd_term) {
+                    try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
+                    try stderr_writer.print(">> Term: {any}\n", .{this.term});
+                }
+                if (opts.print_stdout) {
+                    try stderr_writer.print("stdout({d}bytes):\n{?s}\n", .{
                         if (this.stdout == null) 0 else this.stdout.?.len,
                         this.stdout,
+                    });
+                }
+                if (opts.print_stderr) {
+                    try stderr_writer.print(">> stderr({d}bytes):\n{?s}\n", .{
                         if (this.stderr == null) 0 else this.stderr.?.len,
                         this.stderr,
-                    },
-                );
+                    });
+                }
             }
             if (opts.do_panic) {
                 @panic("assert command succeeded failed!");
