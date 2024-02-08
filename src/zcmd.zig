@@ -18,7 +18,7 @@ pub const Term = union(enum) {
     Stopped: u32,
     Unknown: u32,
 
-    fn fromStatus(status: u32) Term {
+    pub fn fromStatus(status: u32) Term {
         return if (std.os.W.IFEXITED(status))
             Term{ .Exited = std.os.W.EXITSTATUS(status) }
         else if (std.os.W.IFSIGNALED(status))
@@ -40,7 +40,7 @@ pub const ZcmdError = error{
     OutOfMemory,
     CorruptPasswordFile,
     UserNotFound,
-} ||
+} || RunFnError ||
     std.fs.File.OpenError ||
     std.fs.File.WriteError ||
     std.os.AccessError ||
@@ -644,6 +644,86 @@ fn createNullDelimitedEnvMap(arena: std.mem.Allocator, env_map: *const std.proce
     return envp_buf;
 }
 
+pub const RunFnError = error{
+    OOM,
+    IOError,
+    ParamsInValid,
+    InternalError,
+};
+
+pub fn forkAndRun(
+    arena: std.mem.Allocator,
+    comptime PayloadType: type,
+    runFn: *const fn (payload: PayloadType) RunFnError!void,
+    payload: PayloadType,
+) !RunResult {
+    const stdout_pipe = try std.os.pipe();
+    const stderr_pipe = try std.os.pipe();
+    const err_pipe = try std.os.pipe();
+    const pid_result = try std.os.fork();
+
+    if (pid_result == 0) {
+        // we are child
+
+        std.os.close(err_pipe[0]);
+        defer std.os.close(err_pipe[1]);
+
+        std.os.dup2(stdout_pipe[1], std.os.STDOUT_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        std.os.dup2(stderr_pipe[1], std.os.STDERR_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        std.os.close(stdout_pipe[0]);
+        std.os.close(stdout_pipe[1]);
+        std.os.close(stderr_pipe[0]);
+        std.os.close(stderr_pipe[1]);
+
+        runFn(payload) catch |err| {
+            forkChildErrReport(err_pipe[1], err);
+            std.os.exit(1);
+        };
+
+        std.os.exit(0);
+    }
+
+    // we are parent
+
+    std.os.close(stdout_pipe[1]);
+    std.os.close(stderr_pipe[1]);
+
+    const max_output_bytes = 8 * 1024 * 1024 * 1024;
+
+    var poller = std.io.poll(arena, enum { stdout, stderr }, .{
+        .stdout = std.fs.File{ .handle = stdout_pipe[0] },
+        .stderr = std.fs.File{ .handle = stderr_pipe[0] },
+    });
+    defer poller.deinit();
+    while (try poller.poll()) {
+        if (poller.fifo(.stdout).count > max_output_bytes)
+            return error.StdoutStreamTooLong;
+        if (poller.fifo(.stderr).count > max_output_bytes)
+            return error.StdoutStreamTooLong;
+    }
+    var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
+    var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
+
+    try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
+    const err_int = try readIntFd(err_pipe[0]);
+    defer {
+        std.os.close(err_pipe[0]);
+        std.os.close(err_pipe[1]);
+    }
+    if (err_int != std.math.maxInt(ErrInt)) {
+        return @as(ZcmdError, @errorCast(@errorFromInt(err_int)));
+    }
+
+    const result = std.os.waitpid(pid_result, 0);
+    return RunResult{
+        .allocator = arena,
+        .args = .{ .allocator = arena, .commands = &[_][]const []const u8{&[_][]const u8{@typeName(PayloadType)}} },
+        .term = Term.fromStatus(result.status),
+        .stdout = try stdout_array.toOwnedSlice(),
+        .stderr = try stderr_array.toOwnedSlice(),
+    };
+}
+
 // internals and tests
 
 fn _testIsError(comptime T: type, maybe_value: anyerror!T, expected_error: anyerror) bool {
@@ -962,4 +1042,25 @@ test "RunResult" {
         defer result.deinit();
         try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
     }
+}
+
+const TestPayload = struct {
+    hello: []const u8,
+};
+
+fn _testForkAndRun(payload: TestPayload) RunFnError!void {
+    std.io.getStdOut().writer().print("{s}", .{payload.hello}) catch {
+        return RunFnError.IOError;
+    };
+}
+
+test "forkAndRun" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    const result = try forkAndRun(arena, TestPayload, _testForkAndRun, .{ .hello = "world" });
+    defer result.deinit();
+    try result.assertSucceeded(.{});
+    try testing.expectEqualSlices(u8, result.stdout.?, "world");
 }
