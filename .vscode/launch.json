@@ -7,6 +7,14 @@
     {
       "type": "lldb",
       "request": "launch",
+      "name": "Debug zchan_test",
+      "program": "${workspaceFolder}/zig-out/bin/zchan_test",
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
       "name": "Debug",
       "program": "${workspaceFolder}/zig-out/bin/zcmd",
       "args": [],
