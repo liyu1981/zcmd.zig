@@ -23,6 +23,7 @@ fn defineChan(comptime TaskType: type) type {
         task_buf_head: usize,
         task_count: usize,
         mutex: std.Thread.Mutex,
+        cond: std.Thread.Condition,
 
         pub fn init(allocator: std.mem.Allocator) !Self {
             var c = Self{
@@ -32,6 +33,7 @@ fn defineChan(comptime TaskType: type) type {
                 .task_buf_head = 0,
                 .task_count = 0,
                 .mutex = std.Thread.Mutex{},
+                .cond = std.Thread.Condition{},
             };
             try c.task_buf.ensureTotalCapacityPrecise(MIN_BUF_SIZE);
             return c;
@@ -42,7 +44,7 @@ fn defineChan(comptime TaskType: type) type {
             // TODO: should we release the lock here?
         }
 
-        pub fn appendTask(this: *Self, taskValue: *const TaskType) !void {
+        fn _appendTask(this: *Self, task_value_: *const TaskType) !void {
             var tmpbuf = std.ArrayList(u8).init(this.allocator);
             defer tmpbuf.deinit();
 
@@ -53,7 +55,7 @@ fn defineChan(comptime TaskType: type) type {
             try tmpbuf.append(0);
 
             const serialized_start = tmpbuf.items.len;
-            try s2s.serialize(tmpbuf.writer(), TaskType, taskValue.*);
+            try s2s.serialize(tmpbuf.writer(), TaskType, task_value_.*);
             const serialized_len: u64 = @intCast(tmpbuf.items.len - serialized_start);
 
             tmpbuf.items[size_start] = @intCast(serialized_len >> 24);
@@ -68,10 +70,19 @@ fn defineChan(comptime TaskType: type) type {
             this.task_count += 1;
         }
 
-        pub fn popTask(this: *Self) !?PopTaskValue {
-            if (this.task_head == this.task_buf_head)
-                return null;
+        pub fn appendTask(this: *Self, task_value_: *const TaskType) !void {
+            this.mutex.lock();
+            defer this.mutex.unlock();
 
+            try this._appendTask(task_value_);
+
+            const old_task_count = this.task_count;
+            while (this.task_count >= old_task_count) {
+                this.cond.wait(&this.mutex);
+            }
+        }
+
+        fn _popTask(this: *Self) !?PopTaskValue {
             var head = this.task_head;
             var json_len: u64 = (@as(u64, @intCast(this.task_buf.items[head])) << 24);
             head += 1;
@@ -96,6 +107,19 @@ fn defineChan(comptime TaskType: type) type {
                 .allocator = this.allocator,
                 .task = task,
             };
+        }
+
+        pub fn popTask(this: *Self) !?PopTaskValue {
+            while (true) {
+                if (this.task_head == this.task_buf_head)
+                    continue;
+
+                this.mutex.lock();
+                defer this.mutex.unlock();
+
+                this.cond.signal();
+                return try this._popTask();
+            }
         }
 
         fn ensureTaskBufIncrementalCapacity(this: *Self, incremental_len: usize) !void {
@@ -141,64 +165,50 @@ const TestT2 = struct { a: i32, b: i32, c: i32 };
 fn testChanFunc(chan: *defineChan(TestT2)) anyerror!void {
     std.debug.print("\nstarted thread!\n", .{});
     var maybe_t = try chan.popTask();
-    // var result: TestT2 = .{
-    //     .a = 0,
-    //     .b = 0,
-    //     .c = 0,
-    // };
     if (maybe_t) |t| {
         defer maybe_t.?.deinit();
         std.debug.print("\npoped: {any}\n", .{t.task});
-        // result.a = t.task.a;
-        // result.b = t.task.b;
-        // result.c = t.task.a + t.task.b;
         try chan.appendTask(&.{
             .a = t.task.a,
             .b = t.task.b,
             .c = t.task.a + t.task.b,
         });
     }
-    // try chan.appendTask(&result);
 }
 
-test "makeChan" {
-    {
-        var ch = try makeChan(TestT1, testing.allocator);
-        defer ch.deinit();
-        const t1 = .{ .a = 1, .b = "hello" };
-        const t2 = .{ .a = 2, .b = "world" };
-        try ch.appendTask(&t1);
-        try ch.appendTask(&t2);
-        var maybe_t = try ch.popTask();
-        try testing.expect(maybe_t != null);
-        if (maybe_t) |t| {
-            defer maybe_t.?.deinit();
-            try testing.expectEqual(t.task.a, 1);
-            try testing.expectEqualSlices(u8, t.task.b, "hello");
-        }
-        maybe_t = try ch.popTask();
-        try testing.expect(maybe_t != null);
-        if (maybe_t) |t| {
-            defer maybe_t.?.deinit();
-            try testing.expectEqual(t.task.a, 2);
-            try testing.expectEqualSlices(u8, t.task.b, "world");
-        }
-        maybe_t = try ch.popTask();
-        try testing.expect(maybe_t == null);
+test "_appendTask/_popTask" {
+    var ch = try makeChan(TestT1, testing.allocator);
+    defer ch.deinit();
+    const t1 = .{ .a = 1, .b = "hello" };
+    const t2 = .{ .a = 2, .b = "world" };
+    try ch._appendTask(&t1);
+    try ch._appendTask(&t2);
+    var maybe_t = try ch._popTask();
+    try testing.expect(maybe_t != null);
+    if (maybe_t) |t| {
+        defer maybe_t.?.deinit();
+        try testing.expectEqual(t.task.a, 1);
+        try testing.expectEqualSlices(u8, t.task.b, "hello");
     }
+    maybe_t = try ch._popTask();
+    try testing.expect(maybe_t != null);
+    if (maybe_t) |t| {
+        defer maybe_t.?.deinit();
+        try testing.expectEqual(t.task.a, 2);
+        try testing.expectEqualSlices(u8, t.task.b, "world");
+    }
+}
 
-    {
-        var ch = try makeChan(TestT2, testing.allocator);
-        defer ch.deinit();
-        const t1 = .{ .a = 1, .b = 2, .c = 0 };
-        try ch.appendTask(&t1);
-        var thread = try spawn(TestT2, &ch, testChanFunc);
-        thread.join();
-        var maybe_t = try ch.popTask();
-        try testing.expect(maybe_t != null);
-        if (maybe_t) |t| {
-            defer maybe_t.?.deinit();
-            try testing.expectEqual(t.task.c, 3);
-        }
+test "appendTask/popTask" {
+    var ch = try makeChan(TestT2, testing.allocator);
+    defer ch.deinit();
+    const t1 = .{ .a = 1, .b = 2, .c = 0 };
+    _ = try spawn(TestT2, &ch, testChanFunc);
+    try ch.appendTask(&t1);
+    var maybe_t = try ch.popTask();
+    try testing.expect(maybe_t != null);
+    if (maybe_t) |t| {
+        defer maybe_t.?.deinit();
+        try testing.expectEqual(t.task.c, 3);
     }
 }
