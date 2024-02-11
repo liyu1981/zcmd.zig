@@ -3,19 +3,10 @@ const builtin = @import("builtin");
 const testing = std.testing;
 const s2s = @import("s2s.zig");
 
-fn defineChan(comptime TaskType: type) type {
+pub fn Chan(comptime DataType: type) type {
     return struct {
         const Self = @This();
         const MIN_BUF_SIZE = if (builtin.is_test) 64 else 16 * std.mem.page_size;
-
-        const PopTaskValue = struct {
-            allocator: std.mem.Allocator,
-            task: TaskType,
-
-            pub fn deinit(this: *PopTaskValue) void {
-                s2s.free(this.allocator, TaskType, &this.task);
-            }
-        };
 
         allocator: std.mem.Allocator,
         task_buf: std.ArrayList(u8),
@@ -44,7 +35,11 @@ fn defineChan(comptime TaskType: type) type {
             // TODO: should we release the lock here?
         }
 
-        fn _appendTask(this: *Self, task_value_: *const TaskType) !void {
+        pub fn free(this: *const Self, data_: *DataType) void {
+            s2s.free(this.allocator, DataType, data_);
+        }
+
+        fn _appendTask(this: *Self, task_value_: *const DataType) !void {
             var tmpbuf = std.ArrayList(u8).init(this.allocator);
             defer tmpbuf.deinit();
 
@@ -55,7 +50,7 @@ fn defineChan(comptime TaskType: type) type {
             try tmpbuf.append(0);
 
             const serialized_start = tmpbuf.items.len;
-            try s2s.serialize(tmpbuf.writer(), TaskType, task_value_.*);
+            try s2s.serialize(tmpbuf.writer(), DataType, task_value_.*);
             const serialized_len: u64 = @intCast(tmpbuf.items.len - serialized_start);
 
             tmpbuf.items[size_start] = @intCast(serialized_len >> 24);
@@ -70,7 +65,7 @@ fn defineChan(comptime TaskType: type) type {
             this.task_count += 1;
         }
 
-        pub fn appendTask(this: *Self, task_value_: *const TaskType) !void {
+        pub fn appendTask(this: *Self, task_value_: *const DataType) !void {
             this.mutex.lock();
             defer this.mutex.unlock();
 
@@ -82,7 +77,7 @@ fn defineChan(comptime TaskType: type) type {
             }
         }
 
-        fn _popTask(this: *Self) !?PopTaskValue {
+        fn _popTask(this: *Self) !DataType {
             var head = this.task_head;
             var json_len: u64 = (@as(u64, @intCast(this.task_buf.items[head])) << 24);
             head += 1;
@@ -94,7 +89,7 @@ fn defineChan(comptime TaskType: type) type {
             head += 1;
 
             var seralized_data = std.io.fixedBufferStream(this.task_buf.items[head .. head + @as(usize, @intCast(json_len))]);
-            const task = try s2s.deserializeAlloc(seralized_data.reader(), TaskType, this.allocator);
+            const ch_data = try s2s.deserializeAlloc(seralized_data.reader(), DataType, this.allocator);
 
             this.task_head += 4 + @as(usize, @intCast(json_len));
             this.task_count -= 1;
@@ -103,13 +98,10 @@ fn defineChan(comptime TaskType: type) type {
                 try this.shrinkTaskBufCapacityByHalf();
             }
 
-            return .{
-                .allocator = this.allocator,
-                .task = task,
-            };
+            return ch_data;
         }
 
-        pub fn popTask(this: *Self) !?PopTaskValue {
+        pub fn popTask(this: *Self) !DataType {
             while (true) {
                 if (this.task_head == this.task_buf_head)
                     continue;
@@ -143,37 +135,37 @@ fn defineChan(comptime TaskType: type) type {
             this.task_head = 0;
             this.task_buf_head = old_buf_len;
         }
+
+        pub fn spawn(this: *Self, comptime rfunc: ChanRoutineFn(DataType)) !std.Thread {
+            return try std.Thread.spawn(.{}, rfunc, .{this});
+        }
     };
 }
 
-pub inline fn makeChan(comptime TaskType: type, allocator: std.mem.Allocator) !defineChan(TaskType) {
-    return try defineChan(TaskType).init(allocator);
+pub inline fn makeChan(comptime DataType: type, allocator: std.mem.Allocator) !Chan(DataType) {
+    return try Chan(DataType).init(allocator);
 }
 
-fn defineChanRoutineFn(comptime TaskType: type) type {
-    return fn (chan: *defineChan(TaskType)) anyerror!void;
+pub fn ChanRoutineFn(comptime DataType: type) type {
+    return fn (chan: *Chan(DataType)) anyerror!void;
 }
 
-pub fn spawn(comptime TaskType: type, chan: *defineChan(TaskType), comptime rfunc: defineChanRoutineFn(TaskType)) !std.Thread {
-    return try std.Thread.spawn(.{}, rfunc, .{chan});
-}
+// all tests
 
 const TestT1 = struct { a: i32, b: []const u8 };
 
 const TestT2 = struct { a: i32, b: i32, c: i32 };
 
-fn testChanFunc(chan: *defineChan(TestT2)) anyerror!void {
+fn testChanFunc(chan: *Chan(TestT2)) anyerror!void {
     std.debug.print("\nstarted thread!\n", .{});
-    var maybe_t = try chan.popTask();
-    if (maybe_t) |t| {
-        defer maybe_t.?.deinit();
-        std.debug.print("\npoped: {any}\n", .{t.task});
-        try chan.appendTask(&.{
-            .a = t.task.a,
-            .b = t.task.b,
-            .c = t.task.a + t.task.b,
-        });
-    }
+    var t = try chan.popTask();
+    defer chan.free(&t);
+    std.debug.print("\npoped: {any}\n", .{t});
+    try chan.appendTask(&.{
+        .a = t.a,
+        .b = t.b,
+        .c = t.a + t.b,
+    });
 }
 
 test "_appendTask/_popTask" {
@@ -183,19 +175,17 @@ test "_appendTask/_popTask" {
     const t2 = .{ .a = 2, .b = "world" };
     try ch._appendTask(&t1);
     try ch._appendTask(&t2);
-    var maybe_t = try ch._popTask();
-    try testing.expect(maybe_t != null);
-    if (maybe_t) |t| {
-        defer maybe_t.?.deinit();
-        try testing.expectEqual(t.task.a, 1);
-        try testing.expectEqualSlices(u8, t.task.b, "hello");
+    {
+        var t = try ch._popTask();
+        defer ch.free(&t);
+        try testing.expectEqual(t.a, 1);
+        try testing.expectEqualSlices(u8, t.b, "hello");
     }
-    maybe_t = try ch._popTask();
-    try testing.expect(maybe_t != null);
-    if (maybe_t) |t| {
-        defer maybe_t.?.deinit();
-        try testing.expectEqual(t.task.a, 2);
-        try testing.expectEqualSlices(u8, t.task.b, "world");
+    {
+        var t = try ch._popTask();
+        defer ch.free(&t);
+        try testing.expectEqual(t.a, 2);
+        try testing.expectEqualSlices(u8, t.b, "world");
     }
 }
 
@@ -203,12 +193,9 @@ test "appendTask/popTask" {
     var ch = try makeChan(TestT2, testing.allocator);
     defer ch.deinit();
     const t1 = .{ .a = 1, .b = 2, .c = 0 };
-    _ = try spawn(TestT2, &ch, testChanFunc);
+    _ = try ch.spawn(testChanFunc);
     try ch.appendTask(&t1);
-    var maybe_t = try ch.popTask();
-    try testing.expect(maybe_t != null);
-    if (maybe_t) |t| {
-        defer maybe_t.?.deinit();
-        try testing.expectEqual(t.task.c, 3);
-    }
+    var t = try ch.popTask();
+    defer ch.free(&t);
+    try testing.expectEqual(t.c, 3);
 }
