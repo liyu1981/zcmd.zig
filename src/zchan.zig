@@ -6,7 +6,7 @@ const s2s = @import("s2s.zig");
 pub fn Chan(comptime DataType: type) type {
     return struct {
         const Self = @This();
-        const MIN_BUF_SIZE = if (builtin.is_test) 64 else 16 * std.mem.page_size;
+        const MIN_BUF_SIZE = if (builtin.is_test) 32 else 16 * std.mem.page_size;
 
         allocator: std.mem.Allocator,
         task_buf: std.ArrayList(u8),
@@ -15,6 +15,7 @@ pub fn Chan(comptime DataType: type) type {
         task_count: usize,
         mutex: std.Thread.Mutex,
         cond: std.Thread.Condition,
+        initiator_tid: std.Thread.Id,
 
         pub fn init(allocator: std.mem.Allocator) !Self {
             var c = Self{
@@ -25,6 +26,7 @@ pub fn Chan(comptime DataType: type) type {
                 .task_count = 0,
                 .mutex = std.Thread.Mutex{},
                 .cond = std.Thread.Condition{},
+                .initiator_tid = std.Thread.getCurrentId(),
             };
             try c.task_buf.ensureTotalCapacityPrecise(MIN_BUF_SIZE);
             return c;
@@ -103,7 +105,7 @@ pub fn Chan(comptime DataType: type) type {
 
         pub fn popTask(this: *Self) !DataType {
             while (true) {
-                if (this.task_head == this.task_buf_head)
+                if (this.task_count <= 0)
                     continue;
 
                 this.mutex.lock();
@@ -136,8 +138,30 @@ pub fn Chan(comptime DataType: type) type {
             this.task_buf_head = old_buf_len;
         }
 
-        pub fn spawn(this: *Self, comptime rfunc: ChanRoutineFn(DataType)) !std.Thread {
-            return try std.Thread.spawn(.{}, rfunc, .{this});
+        pub fn spawn(this: *Self, comptime rfunc: anytype, args: anytype) !std.Thread {
+            switch (@typeInfo(@TypeOf(rfunc))) {
+                .Fn => |f| {
+                    if (f.params.len <= 0)
+                        @compileError("chan.spawn rfunc must accept at least take one param: chan: *Chan(" ++ @typeName(DataType) ++ ")");
+                    if (f.params[0].type.? != *Chan(DataType))
+                        @compileError("chan.spawn rfunc 1st param must be: chan: *Chan(" ++ @typeName(DataType) ++ ")");
+                    if (f.return_type.? != anyerror!void)
+                        @compileError("chan.spawn rfunc return type must be anyerror!void, found: " ++ @typeName(f.return_type.?));
+                },
+                else => {
+                    @compileError("chan.spawn rfunc param must be a function! found: " ++ @typeName(@TypeOf(rfunc)));
+                },
+            }
+            switch (@typeInfo(@TypeOf(args))) {
+                .Struct => |s| {
+                    if (!s.is_tuple)
+                        @compileError("chan.spawn args param must be a tuple! found: struct!");
+                },
+                else => {
+                    @compileError("chan.spawn args param must be a tuple! found: " ++ @typeName(@TypeOf(args)));
+                },
+            }
+            return try std.Thread.spawn(.{}, rfunc, .{this} ++ args);
         }
     };
 }
@@ -146,18 +170,14 @@ pub inline fn makeChan(comptime DataType: type, allocator: std.mem.Allocator) !C
     return try Chan(DataType).init(allocator);
 }
 
-pub fn ChanRoutineFn(comptime DataType: type) type {
-    return fn (chan: *Chan(DataType)) anyerror!void;
-}
-
 // all tests
 
 const TestT1 = struct { a: i32, b: []const u8 };
 
 const TestT2 = struct { a: i32, b: i32, c: i32 };
 
-fn testChanFunc(chan: *Chan(TestT2)) anyerror!void {
-    std.debug.print("\nstarted thread!\n", .{});
+fn testChanFunc(chan: *Chan(TestT2), name: []const u8) anyerror!void {
+    std.debug.print("\nstarted thread: {s}!\n", .{name});
     var t = try chan.popTask();
     defer chan.free(&t);
     std.debug.print("\npoped: {any}\n", .{t});
@@ -193,9 +213,38 @@ test "appendTask/popTask" {
     var ch = try makeChan(TestT2, testing.allocator);
     defer ch.deinit();
     const t1 = .{ .a = 1, .b = 2, .c = 0 };
-    _ = try ch.spawn(testChanFunc);
+    _ = try ch.spawn(testChanFunc, .{"tester"});
     try ch.appendTask(&t1);
     var t = try ch.popTask();
     defer ch.free(&t);
     try testing.expectEqual(t.c, 3);
+}
+
+fn testNoParam() anyerror!void {}
+
+test "compileError: testNoParam" {
+    var ch = try makeChan(TestT2, testing.allocator);
+    defer ch.deinit();
+    _ = try ch.spawn(testNoParam, .{});
+}
+
+fn testFirstParamWrong(chan: usize) anyerror!void {
+    _ = chan;
+}
+
+test "compileError: testFirstParamWrong" {
+    var ch = try makeChan(TestT2, testing.allocator);
+    defer ch.deinit();
+    _ = try ch.spawn(testFirstParamWrong, .{1});
+}
+
+fn testReturnIsWrong(chan: *Chan(TestT2)) anyerror!usize {
+    _ = chan;
+    return 0;
+}
+
+test "compileError: testReturnIsWrong" {
+    var ch = try makeChan(TestT2, testing.allocator);
+    defer ch.deinit();
+    _ = try ch.spawn(testReturnIsWrong, .{});
 }
