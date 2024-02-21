@@ -90,7 +90,7 @@ pub const RunResult = struct {
     fn _assertSucceededBool(this: *const RunResult, opts: AssertOptions) !bool {
         const failed: bool = brk: {
             switch (this.term) {
-                .Exited => |ret| if (ret != 0) break :brk true else break :brk false,
+                .Exited => |ret| if (ret != 0) break :brk true,
                 else => break :brk true,
             }
             if (opts.check_stdout_not_empty_raw) {
@@ -228,7 +228,13 @@ pub fn run(args: struct {
     max_output_bytes: usize = MAX_OUTPUT,
     expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) ZcmdError!RunResult {
-    const pipe_flags = 0;
+    const pipe_flags = switch (builtin.os.tag) {
+        .linux => .{},
+        .macos => 0,
+        else => {
+            @compileError("Only linux & macos supported.");
+        },
+    };
     var has_stdin_pipe: bool = false;
     const stdin_pipe = brk: {
         if (args.stdin_input != null) {
@@ -475,7 +481,13 @@ fn _run(args: ZcmdArgs) !void {
     // the whole pipeline still use STDIN as input and STDOUT as output, so if we wrap this again, we can capture
     // the io streams
     for (args.commands, 0..) |next_command, i| {
-        const pipe_flags = 0;
+        const pipe_flags = switch (builtin.os.tag) {
+            .linux => .{},
+            .macos => 0,
+            else => {
+                @compileError("Only linux & macos supported.");
+            },
+        };
         var pipe = try std.os.pipe2(pipe_flags);
         const pid_result = try std.os.fork();
         if (pid_result == 0) {
@@ -583,8 +595,8 @@ const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
 fn writeIntFd(fd: i32, value: ErrInt) !void {
     const file = std.fs.File{
         .handle = fd,
-        .capable_io_mode = .blocking,
-        .intended_io_mode = .blocking,
+        // .capable_io_mode = .blocking,
+        // .intended_io_mode = .blocking,
     };
     file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
 }
@@ -592,8 +604,8 @@ fn writeIntFd(fd: i32, value: ErrInt) !void {
 fn readIntFd(fd: i32) !ErrInt {
     const file = std.fs.File{
         .handle = fd,
-        .capable_io_mode = .blocking,
-        .intended_io_mode = .blocking,
+        // .capable_io_mode = .blocking,
+        // .intended_io_mode = .blocking,
     };
     return @as(ErrInt, @intCast(file.reader().readInt(u64, .little) catch return error.SystemResources));
 }
@@ -734,6 +746,20 @@ fn _testIsError(comptime T: type, maybe_value: anyerror!T, expected_error: anyer
     }
 }
 
+fn _extractNumbers(comptime NumberType: type, input: []const u8, dest: []NumberType) !void {
+    var it = std.mem.tokenizeAny(u8, input, &std.ascii.whitespace);
+    var count: usize = 0;
+    while (it.next()) |s| {
+        if (count >= dest.len) {
+            return error.OutOfCapacity;
+        }
+        if (s.len == 0)
+            continue;
+        dest[count] = try std.fmt.parseInt(NumberType, s, 10);
+        count += 1;
+    }
+}
+
 test "normal cases" {
     const allocator = std.testing.allocator;
     {
@@ -756,11 +782,9 @@ test "normal cases" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
         const result = try Zcmd.run(.{
@@ -788,11 +812,9 @@ test "normal cases" {
             .stdin_input = content,
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
         const result = try Zcmd.run(.{
@@ -804,11 +826,9 @@ test "normal cases" {
             .user_name = "root",
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
         var buf: [4096]u8 = undefined;
@@ -826,11 +846,9 @@ test "normal cases" {
             .cwd = abs_path,
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
         var test_dir = try std.fs.cwd().openDir("tests", .{});
@@ -844,11 +862,9 @@ test "normal cases" {
             .cwd_dir = test_dir,
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
         var envmap = std.process.EnvMap.init(allocator);
@@ -906,11 +922,9 @@ test "normal cases" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "    1302    2604\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
 }
 
@@ -926,11 +940,9 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "       0       0\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
@@ -946,11 +958,9 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "       0       0\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
@@ -966,16 +976,26 @@ test "all failures" {
             },
         });
         defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "       0       0\n",
-        );
-        try testing.expectEqualSlices(
-            u8,
-            result.stderr.?,
-            "find: nonexist: No such file or directory\n",
-        );
+        var rbuf: [2]usize = undefined;
+        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
+        switch (builtin.os.tag) {
+            .linux => {
+                try testing.expectEqualSlices(
+                    u8,
+                    result.stderr.?,
+                    "find: ‘nonexist’: No such file or directory\n",
+                );
+            },
+            .macos => {
+                try testing.expectEqualSlices(
+                    u8,
+                    result.stderr.?,
+                    "find: nonexist: No such file or directory\n",
+                );
+            },
+            else => {},
+        }
     }
     {
         const maybe_result = Zcmd.run(.{
