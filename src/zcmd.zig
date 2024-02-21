@@ -55,7 +55,7 @@ pub const RunResult = struct {
     const WHITE_SPACES = " \t\n\r";
 
     const AssertOptions = struct {
-        check_stdout_not_empty: bool = true,
+        check_stdout_not_empty: bool = false,
         check_stdout_not_empty_raw: bool = false,
         check_stderr_empty: bool = true,
         check_stderr_empty_raw: bool = false,
@@ -124,7 +124,7 @@ pub const RunResult = struct {
                     try stderr_writer.print(">> Term: {any}\n", .{this.term});
                 }
                 if (opts.print_stdout) {
-                    try stderr_writer.print("stdout({d}bytes):\n{?s}\n", .{
+                    try stderr_writer.print(">> stdout({d}bytes):\n{?s}\n", .{
                         if (this.stdout == null) 0 else this.stdout.?.len,
                         this.stdout,
                     });
@@ -1026,7 +1026,7 @@ test "RunResult" {
             .argv = &[_][]const u8{ "echo", "-n" },
         });
         defer result.deinit();
-        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{}), ZcmdError.FailedAssertSucceeded));
+        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stdout_not_empty = true }), ZcmdError.FailedAssertSucceeded));
     }
     {
         const result = try Zcmd.runSingle(.{
