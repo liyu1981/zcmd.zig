@@ -229,8 +229,7 @@ pub fn run(args: struct {
     expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) ZcmdError!RunResult {
     const pipe_flags = switch (builtin.os.tag) {
-        .linux => .{},
-        .macos => 0,
+        .linux, .macos => .{},
         else => {
             @compileError("Only linux & macos supported.");
         },
@@ -482,8 +481,7 @@ fn _run(args: ZcmdArgs) !void {
     // the io streams
     for (args.commands, 0..) |next_command, i| {
         const pipe_flags = switch (builtin.os.tag) {
-            .linux => .{},
-            .macos => 0,
+            .linux, .macos => .{},
             else => {
                 @compileError("Only linux & macos supported.");
             },
