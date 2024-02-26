@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 const OS_PAGE_SIZE = switch (builtin.os.tag) {
-    .linux, .macos => std.mem.page_size,
+    .linux, .macos, .windows => std.mem.page_size,
     else => {
         // this is also our os_selector for implementation :)
         @compileError("Only linux & macos supported.");
@@ -162,8 +162,8 @@ pub const ZcmdArgs = struct {
     commands: []const []const []const u8,
     stdin_input: ?[]const u8 = null,
     user_name: ?[]const u8 = null,
-    uid: ?std.os.uid_t = null,
-    gid: ?std.os.uid_t = null,
+    uid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
+    gid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
     cwd: ?[]const u8 = null,
     cwd_dir: ?std.fs.Dir = null,
     env_map: ?*const std.process.EnvMap = null,
@@ -220,20 +220,37 @@ pub fn run(args: struct {
     commands: []const []const []const u8,
     stdin_input: ?[]const u8 = null,
     user_name: ?[]const u8 = null,
-    uid: ?std.os.uid_t = null,
-    gid: ?std.os.uid_t = null,
+    uid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
+    gid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
     cwd: ?[]const u8 = null,
     cwd_dir: ?std.fs.Dir = null,
     env_map: ?*const std.process.EnvMap = null,
     max_output_bytes: usize = MAX_OUTPUT,
     expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) ZcmdError!RunResult {
-    const pipe_flags = switch (builtin.os.tag) {
-        .linux, .macos => .{},
+    switch (builtin.os.tag) {
+        .linux, .macos => return runPosix(args),
+        .windows => unreachable,
         else => {
-            @compileError("Only linux & macos supported.");
+            @compileError("Only linux/macos/windows supported.");
         },
-    };
+    }
+}
+
+fn runPosix(args: struct {
+    allocator: std.mem.Allocator,
+    commands: []const []const []const u8,
+    stdin_input: ?[]const u8 = null,
+    user_name: ?[]const u8 = null,
+    uid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
+    gid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
+    cwd: ?[]const u8 = null,
+    cwd_dir: ?std.fs.Dir = null,
+    env_map: ?*const std.process.EnvMap = null,
+    max_output_bytes: usize = MAX_OUTPUT,
+    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
+}) ZcmdError!RunResult {
+    const pipe_flags = .{};
     var has_stdin_pipe: bool = false;
     const stdin_pipe = brk: {
         if (args.stdin_input != null) {
@@ -314,7 +331,7 @@ pub fn run(args: struct {
             std.os.chdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
         }
 
-        Zcmd._run(_args) catch |err| forkChildErrReport(err_pipe[1], err);
+        Zcmd.runPipelinePosix(_args) catch |err| forkChildErrReport(err_pipe[1], err);
         std.os.exit(0);
     } else {
         // we are parent
@@ -340,7 +357,7 @@ pub fn run(args: struct {
         std.os.close(stderr_pipe[1]);
 
         if (has_stdin_pipe) {
-            try _feedStdinInput(stdin_pipe[1], args.stdin_input.?);
+            try feedStdinInputPosix(stdin_pipe[1], args.stdin_input.?);
         }
 
         var poller = std.io.poll(args.allocator, enum { stdout, stderr }, .{
@@ -357,8 +374,8 @@ pub fn run(args: struct {
         var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
         var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
 
-        try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
-        const err_int = try readIntFd(err_pipe[0]);
+        try writeIntFdPosix(err_pipe[1], std.math.maxInt(ErrInt));
+        const err_int = try readIntFdPosix(err_pipe[0]);
         defer {
             std.os.close(err_pipe[0]);
             std.os.close(err_pipe[1]);
@@ -384,8 +401,8 @@ pub fn runSelfManaged(args: struct {
     commands: []const []const []const u8,
     stdin_input: ?[]const u8 = null,
     user_name: ?[]const u8 = null,
-    uid: ?std.os.uid_t = null,
-    gid: ?std.os.uid_t = null,
+    uid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
+    gid: if (builtin.os.tag == .windows) ?void else ?std.os.uid_t = null,
     cwd: ?[]const u8 = null,
     cwd_dir: ?std.fs.Dir = null,
     env_map: ?*const std.process.EnvMap = null,
@@ -428,7 +445,7 @@ pub fn runSingle(args: struct {
     });
 }
 
-fn _feedStdinInput(fd: std.os.system.fd_t, stdin_input: []const u8) !void {
+fn feedStdinInputPosix(fd: std.os.system.fd_t, stdin_input: []const u8) !void {
     // credit goes to: https://www.reddit.com/r/Zig/comments/13674ed/help_request_using_stdin_with_childprocess/
     const stdin = std.fs.File{ .handle = fd };
 
@@ -470,7 +487,7 @@ fn _feedStdinInput(fd: std.os.system.fd_t, stdin_input: []const u8) !void {
     stdin.close();
 }
 
-fn _run(args: ZcmdArgs) !void {
+fn runPipelinePosix(args: ZcmdArgs) !void {
     // here we create a pipe then fork a copy of ourself, but instead of executing command, we do it in parent, and
     // let child to prepare for next environment. Using an example command pipelien
     // `cat ./tests/big_input.txt | wc -lw | wc-lw`, we will
@@ -482,6 +499,7 @@ fn _run(args: ZcmdArgs) !void {
     for (args.commands, 0..) |next_command, i| {
         const pipe_flags = switch (builtin.os.tag) {
             .linux, .macos => .{},
+            .windows => .{},
             else => {
                 @compileError("Only linux & macos supported.");
             },
@@ -511,7 +529,7 @@ fn _run(args: ZcmdArgs) !void {
             std.os.close(pipe[0]);
             std.os.close(pipe[1]);
 
-            Zcmd.executeCommand(
+            Zcmd.executeCommandPosix(
                 args.allocator,
                 next_command,
                 args.env_map,
@@ -525,7 +543,7 @@ fn _run(args: ZcmdArgs) !void {
     }
 }
 
-fn executeCommand(
+fn executeCommandPosix(
     allocator: std.mem.Allocator,
     command: []const []const u8,
     env_map: ?*const std.process.EnvMap,
@@ -590,7 +608,7 @@ fn executeCommand(
 
 const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
 
-fn writeIntFd(fd: i32, value: ErrInt) !void {
+fn writeIntFdPosix(fd: i32, value: ErrInt) !void {
     const file = std.fs.File{
         .handle = fd,
         // .capable_io_mode = .blocking,
@@ -599,7 +617,7 @@ fn writeIntFd(fd: i32, value: ErrInt) !void {
     file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
 }
 
-fn readIntFd(fd: i32) !ErrInt {
+fn readIntFdPosix(fd: i32) !ErrInt {
     const file = std.fs.File{
         .handle = fd,
         // .capable_io_mode = .blocking,
@@ -611,7 +629,7 @@ fn readIntFd(fd: i32) !ErrInt {
 // Child of fork calls this to report an error to the fork parent.
 // Then the child exits.
 fn forkChildErrReport(fd: i32, err: ZcmdError) noreturn {
-    writeIntFd(fd, @as(ErrInt, @intFromError(err))) catch {};
+    writeIntFdPosix(fd, @as(ErrInt, @intFromError(err))) catch {};
     // If we're linking libc, some naughty applications may have registered atexit handlers
     // which we really do not want to run in the fork child. I caught LLVM doing this and
     // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
@@ -667,6 +685,21 @@ pub fn forkAndRun(
     runFn: *const fn (payload: PayloadType) RunFnError!void,
     payload: PayloadType,
 ) !RunResult {
+    switch (builtin.os.tag) {
+        .linux, .macos => return forkAndRunPosix(arena, runFn, payload),
+        .windows => unreachable,
+        else => {
+            @compileError("Only linux/macos/windows supported.");
+        },
+    }
+}
+
+fn forkAndRunPosix(
+    arena: std.mem.Allocator,
+    comptime PayloadType: type,
+    runFn: *const fn (payload: PayloadType) RunFnError!void,
+    payload: PayloadType,
+) !RunResult {
     const stdout_pipe = try std.os.pipe();
     const stderr_pipe = try std.os.pipe();
     const err_pipe = try std.os.pipe();
@@ -714,8 +747,8 @@ pub fn forkAndRun(
     var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
     var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
 
-    try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
-    const err_int = try readIntFd(err_pipe[0]);
+    try writeIntFdPosix(err_pipe[1], std.math.maxInt(ErrInt));
+    const err_int = try readIntFdPosix(err_pipe[0]);
     defer {
         std.os.close(err_pipe[0]);
         std.os.close(err_pipe[1]);
@@ -760,250 +793,270 @@ fn _extractNumbers(comptime NumberType: type, input: []const u8, dest: []NumberT
 
 test "normal cases" {
     const allocator = std.testing.allocator;
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "uname", "-a" },
-            },
-        });
-        defer result.deinit();
-        try testing.expectEqual(result.term.Exited, 0);
-        try testing.expect(result.stdout.?.len > 0);
-    }
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./tests/big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
-                &.{ "sort", "-nr" },
-                &.{ "head", "-1" },
-            },
-        });
-        defer result.deinit();
-        try testing.expect(result.stdout.?.len > 0);
-    }
-    {
-        const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
-        defer f.close();
-        const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
-        defer allocator.free(content);
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"cat"},
-                &.{ "wc", "-lw" },
-            },
-            .stdin_input = content,
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./tests/big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-            .user_name = "root",
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        var buf: [4096]u8 = undefined;
-        var paths: [2][]const u8 = undefined;
-        paths[0] = try std.process.getCwd(&buf);
-        paths[1] = "tests";
-        const abs_path = try std.fs.path.join(allocator, &paths);
-        defer allocator.free(abs_path);
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-            .cwd = abs_path,
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        var test_dir = try std.fs.cwd().openDir("tests", .{});
-        defer test_dir.close();
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-            .cwd_dir = test_dir,
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        var envmap = std.process.EnvMap.init(allocator);
-        defer envmap.deinit();
-        try envmap.put("ZCMD_TEST_ENV1", "hello");
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"printenv"},
-                &.{ "grep", "ZCMD_TEST_ENV1" },
-            },
-            .env_map = &envmap,
-        });
-        defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "ZCMD_TEST_ENV1=hello\n",
-        );
-    }
-    {
-        var envmap = std.process.EnvMap.init(allocator);
-        defer envmap.deinit();
-        try envmap.put("ZCMD_TEST_ENV1", "hello");
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"printenv"},
-                &.{ "grep", "ZCMD_TEST_ENV1" },
-            },
-            .env_map = &envmap,
-            .expand_arg0 = .expand,
-        });
-        defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "ZCMD_TEST_ENV1=hello\n",
-        );
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "uname", "-a" },
-        });
-        defer result.deinit();
-        try testing.expectEqual(result.term.Exited, 0);
-        try testing.expect(result.stdout.?.len > 0);
-    }
-    {
-        const result = try Zcmd.runSelfManaged(.{
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./tests/big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+    switch (builtin.os.tag) {
+        .linux, .macos => {
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "uname", "-a" },
+                    },
+                });
+                defer result.deinit();
+                try testing.expectEqual(result.term.Exited, 0);
+                try testing.expect(result.stdout.?.len > 0);
+            }
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./tests/big_input.txt" },
+                        &.{ "wc", "-lw" },
+                    },
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
+                        &.{ "sort", "-nr" },
+                        &.{ "head", "-1" },
+                    },
+                });
+                defer result.deinit();
+                try testing.expect(result.stdout.?.len > 0);
+            }
+            {
+                const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
+                defer f.close();
+                const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
+                defer allocator.free(content);
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{"cat"},
+                        &.{ "wc", "-lw" },
+                    },
+                    .stdin_input = content,
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./tests/big_input.txt" },
+                        &.{ "wc", "-lw" },
+                    },
+                    .user_name = "root",
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+            {
+                var buf: [4096]u8 = undefined;
+                var paths: [2][]const u8 = undefined;
+                paths[0] = try std.process.getCwd(&buf);
+                paths[1] = "tests";
+                const abs_path = try std.fs.path.join(allocator, &paths);
+                defer allocator.free(abs_path);
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./big_input.txt" },
+                        &.{ "wc", "-lw" },
+                    },
+                    .cwd = abs_path,
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+            {
+                var test_dir = try std.fs.cwd().openDir("tests", .{});
+                defer test_dir.close();
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./big_input.txt" },
+                        &.{ "wc", "-lw" },
+                    },
+                    .cwd_dir = test_dir,
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+            {
+                var envmap = std.process.EnvMap.init(allocator);
+                defer envmap.deinit();
+                try envmap.put("ZCMD_TEST_ENV1", "hello");
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{"printenv"},
+                        &.{ "grep", "ZCMD_TEST_ENV1" },
+                    },
+                    .env_map = &envmap,
+                });
+                defer result.deinit();
+                try testing.expectEqualSlices(
+                    u8,
+                    result.stdout.?,
+                    "ZCMD_TEST_ENV1=hello\n",
+                );
+            }
+            {
+                var envmap = std.process.EnvMap.init(allocator);
+                defer envmap.deinit();
+                try envmap.put("ZCMD_TEST_ENV1", "hello");
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{"printenv"},
+                        &.{ "grep", "ZCMD_TEST_ENV1" },
+                    },
+                    .env_map = &envmap,
+                    .expand_arg0 = .expand,
+                });
+                defer result.deinit();
+                try testing.expectEqualSlices(
+                    u8,
+                    result.stdout.?,
+                    "ZCMD_TEST_ENV1=hello\n",
+                );
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "uname", "-a" },
+                });
+                defer result.deinit();
+                try testing.expectEqual(result.term.Exited, 0);
+                try testing.expect(result.stdout.?.len > 0);
+            }
+            {
+                const result = try Zcmd.runSelfManaged(.{
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./tests/big_input.txt" },
+                        &.{ "wc", "-lw" },
+                    },
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
+            }
+        },
+
+        .windows => unreachable,
+
+        else => {
+            @compileError("Only linux/macos/windows supported.");
+        },
     }
 }
 
 test "all failures" {
     const allocator = std.testing.allocator;
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "find", "tests" },
-                &.{ "sort-of", "-nr" },
-                &.{ "wc", "-lw" },
-            },
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
-        try testing.expectEqualSlices(
-            u8,
-            result.stderr.?,
-            "zig: error.FileNotFound: { sort-of, -nr }\n",
-        );
-    }
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"nonexist"},
-                &.{ "wc", "-lw" },
-            },
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
-        try testing.expectEqualSlices(
-            u8,
-            result.stderr.?,
-            "zig: error.FileNotFound: { nonexist }\n",
-        );
-    }
-    {
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "find", "nonexist" },
-                &.{ "wc", "-lw" },
-            },
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
-        switch (builtin.os.tag) {
-            .linux => {
+    switch (builtin.os.tag) {
+        .linux, .macos => {
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "find", "tests" },
+                        &.{ "sort-of", "-nr" },
+                        &.{ "wc", "-lw" },
+                    },
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
                 try testing.expectEqualSlices(
                     u8,
                     result.stderr.?,
-                    "find: ‘nonexist’: No such file or directory\n",
+                    "zig: error.FileNotFound: { sort-of, -nr }\n",
                 );
-            },
-            .macos => {
+            }
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{"nonexist"},
+                        &.{ "wc", "-lw" },
+                    },
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
                 try testing.expectEqualSlices(
                     u8,
                     result.stderr.?,
-                    "find: nonexist: No such file or directory\n",
+                    "zig: error.FileNotFound: { nonexist }\n",
                 );
-            },
-            else => {},
-        }
-    }
-    {
-        const maybe_result = Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./tests/big_input.txt" },
-            },
-            .max_output_bytes = 1_000,
-        });
-        try testing.expect(_testIsError(RunResult, maybe_result, error.StdoutStreamTooLong));
+            }
+            {
+                const result = try Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "find", "nonexist" },
+                        &.{ "wc", "-lw" },
+                    },
+                });
+                defer result.deinit();
+                var rbuf: [2]usize = undefined;
+                try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
+                try testing.expectEqualDeep(rbuf, [2]usize{ 0, 0 });
+                switch (builtin.os.tag) {
+                    .linux => {
+                        try testing.expectEqualSlices(
+                            u8,
+                            result.stderr.?,
+                            "find: ‘nonexist’: No such file or directory\n",
+                        );
+                    },
+                    .macos => {
+                        try testing.expectEqualSlices(
+                            u8,
+                            result.stderr.?,
+                            "find: nonexist: No such file or directory\n",
+                        );
+                    },
+                    else => {},
+                }
+            }
+            {
+                const maybe_result = Zcmd.run(.{
+                    .allocator = allocator,
+                    .commands = &[_][]const []const u8{
+                        &.{ "cat", "./tests/big_input.txt" },
+                    },
+                    .max_output_bytes = 1_000,
+                });
+                try testing.expect(_testIsError(RunResult, maybe_result, error.StdoutStreamTooLong));
+            }
+        },
+
+        .windows => unreachable,
+
+        else => {
+            @compileError("Only linux/macos/windows supported.");
+        },
     }
 }
 
@@ -1011,54 +1064,64 @@ test "RunResult" {
     const allocator = testing.allocator;
     // std.debug.print("\nstdout: {d}bytes: {?s}\n", .{ if (result.stdout == null) 0 else result.stdout.?.len, result.stdout.? });
     // std.debug.print("\nstderr: {d}bytes: {?s}\n", .{ if (result.stderr == null) 0 else result.stderr.?.len, result.stderr.? });
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "uname", "-a" },
-        });
-        defer result.deinit();
-        try result.assertSucceeded(.{});
-        try result.assertSucceeded(.{ .check_stderr_empty = true });
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "echo", "-n" },
-        });
-        defer result.deinit();
-        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stdout_not_empty = true }), ZcmdError.FailedAssertSucceeded));
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{"echo"},
-        });
-        defer result.deinit();
-        try result.assertSucceeded(.{ .check_stdout_not_empty_raw = true });
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "echo", "-n", "hello" },
-        });
-        defer result.deinit();
-        try result.assertSucceeded(.{ .check_stderr_empty_raw = true });
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "find", "nonexist" },
-        });
-        defer result.deinit();
-        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
-    }
-    {
-        const result = try Zcmd.runSingle(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "bash", "tests/witherr_exit_zero.sh" },
-        });
-        defer result.deinit();
-        try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
+    switch (builtin.os.tag) {
+        .linux, .macos => {
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "uname", "-a" },
+                });
+                defer result.deinit();
+                try result.assertSucceeded(.{});
+                try result.assertSucceeded(.{ .check_stderr_empty = true });
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "echo", "-n" },
+                });
+                defer result.deinit();
+                try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stdout_not_empty = true }), ZcmdError.FailedAssertSucceeded));
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{"echo"},
+                });
+                defer result.deinit();
+                try result.assertSucceeded(.{ .check_stdout_not_empty_raw = true });
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "echo", "-n", "hello" },
+                });
+                defer result.deinit();
+                try result.assertSucceeded(.{ .check_stderr_empty_raw = true });
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "find", "nonexist" },
+                });
+                defer result.deinit();
+                try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
+            }
+            {
+                const result = try Zcmd.runSingle(.{
+                    .allocator = allocator,
+                    .argv = &[_][]const u8{ "bash", "tests/witherr_exit_zero.sh" },
+                });
+                defer result.deinit();
+                try testing.expect(_testIsError(bool, result._assertSucceededBool(.{ .check_stderr_empty_raw = true }), ZcmdError.FailedAssertSucceeded));
+            }
+        },
+
+        .windows => unreachable,
+
+        else => {
+            @compileError("Only linux/macos/windows supported.");
+        },
     }
 }
 
@@ -1077,8 +1140,20 @@ test "forkAndRun" {
     defer aa.deinit();
     const arena = aa.allocator();
 
-    const result = try forkAndRun(arena, TestPayload, _testForkAndRun, .{ .hello = "world" });
-    defer result.deinit();
-    try result.assertSucceeded(.{});
-    try testing.expectEqualSlices(u8, result.stdout.?, "world");
+    switch (builtin.os.tag) {
+        .linux, .macos => {
+            {
+                const result = try forkAndRun(arena, TestPayload, _testForkAndRun, .{ .hello = "world" });
+                defer result.deinit();
+                try result.assertSucceeded(.{});
+                try testing.expectEqualSlices(u8, result.stdout.?, "world");
+            }
+        },
+
+        .windows => unreachable,
+
+        else => {
+            @compileError("Only linux/macos/windows supported.");
+        },
+    }
 }
