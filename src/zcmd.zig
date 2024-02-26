@@ -706,7 +706,7 @@ pub fn forkAndRun(
     payload: PayloadType,
 ) !RunResult {
     switch (builtin.os.tag) {
-        .linux, .macos => return forkAndRunPosix(arena, runFn, payload),
+        .linux, .macos => return forkAndRunPosix(arena, PayloadType, runFn, payload),
         .windows => unreachable,
         else => {
             @compileError("Only linux/macos/windows supported.");
