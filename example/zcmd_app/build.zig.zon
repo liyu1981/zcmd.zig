@@ -4,7 +4,8 @@
     .fingerprint = 0x9f757f69b60ba78d,
     .dependencies = .{
         .zcmd = .{
-            .path = "../..",
+            .url = "https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.4.0.tar.gz",
+            .hash = "1220TODO_RUN_ZIG_FETCH_TO_GET_HASH",
         },
     },
     .paths = .{
