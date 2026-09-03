@@ -1,11 +1,10 @@
 .{
     .name = .zcmd_build_app,
     .version = "0.0.0",
-    .fingerprint = 0x1234567890abcdef,
+    .fingerprint = 0x7afb6475f6653dc5,
     .dependencies = .{
         .zcmd = .{
-            .url = "https://github.com/liyu1981/zcmd.zig/archive/03d1e67853a4ca5ed5e771db5544159b824c6128.tar.gz",
-            .hash = "12206ecf3612cbbe7cd92cc3d29a9cb0b9441d4f006d5bb66551f1fda0ffaf9e68bd",
+            .path = "../..",
         },
     },
     .paths = .{
