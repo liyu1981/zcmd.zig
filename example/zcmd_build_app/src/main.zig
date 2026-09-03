@@ -1,10 +1,15 @@
 const std = @import("std");
+const linux = std.os.linux;
 const buildInfo = @import("build_generated.zig");
 
+fn print(comptime msg: []const u8) void {
+    _ = linux.write(std.posix.STDOUT_FILENO, msg.ptr, msg.len);
+}
+
 pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("Hello!\nversion: {s}\nbuilt os: {s}\n", .{
-        buildInfo.version,
-        buildInfo.built_os,
-    });
+    print("Hello!\nversion: ");
+    print(buildInfo.version);
+    print("\nbuilt os: ");
+    print(buildInfo.built_os);
+    print("\n");
 }

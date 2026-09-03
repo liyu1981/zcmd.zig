@@ -1,8 +1,12 @@
 const std = @import("std");
+const linux = std.os.linux;
+
+fn print(comptime msg: []const u8) void {
+    _ = linux.write(std.posix.STDOUT_FILENO, msg.ptr, msg.len);
+}
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("running: {s}\n", .{"uname -a"});
+    print("running: uname -a\n");
     const allocator = std.heap.page_allocator;
     const result = try @import("zcmd").run(.{
         .allocator = allocator,
@@ -10,5 +14,9 @@ pub fn main() !void {
     });
     defer result.deinit();
     result.assertSucceededPanic(.{});
-    try stdout.print("==== stdout ====\n{?s}\n", .{result.trimedStdout()});
+    print("==== stdout ====\n");
+    if (result.stdout) |stdout| {
+        _ = linux.write(std.posix.STDOUT_FILENO, stdout.ptr, stdout.len);
+        print("\n");
+    }
 }

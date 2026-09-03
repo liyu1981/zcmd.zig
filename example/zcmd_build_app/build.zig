@@ -3,8 +3,8 @@ const std = @import("std");
 // when import in build.zig, the zcmd is exposed in nested const zcmd
 const zcmd = @import("zcmd").zcmd;
 
-fn genBuildInfoMake(self: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!void {
-    _ = prog_node;
+fn genBuildInfoMake(self: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
     _ = self;
     var aa = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer aa.deinit();
@@ -42,9 +42,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "zcmd_build_app",
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe.step.dependOn(gen_build_info_step);
     b.installArtifact(exe);

@@ -1,7 +1,7 @@
 .{
-    .name = "zcmd_build_app",
+    .name = .zcmd_build_app,
     .version = "0.0.0",
-    .minimum_zig_version = "0.12.0",
+    .fingerprint = 0x1234567890abcdef,
     .dependencies = .{
         .zcmd = .{
             .url = "https://github.com/liyu1981/zcmd.zig/archive/03d1e67853a4ca5ed5e771db5544159b824c6128.tar.gz",

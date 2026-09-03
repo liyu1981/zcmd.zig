@@ -1,37 +1,14 @@
 .{
-    .name = "zcmd_app",
-    // This is a [Semantic Version](https://semver.org/).
-    // In a future version of Zig it will be used for package deduplication.
+    .name = .zcmd_app,
     .version = "0.0.0",
-
-    // This field is optional.
-    // This is currently advisory only; Zig does not yet do anything
-    // with this value.
-    //.minimum_zig_version = "0.11.0",
-
-    // This field is optional.
-    // Each dependency must either provide a `url` and `hash`, or a `path`.
-    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
-    // Once all dependencies are fetched, `zig build` no longer requires
-    // Internet connectivity.
+    .fingerprint = 0x1234567890abcdef,
     .dependencies = .{
-        // refresh this part like `zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.3.0.tar.gz`
         .zcmd = .{
             .url = "https://github.com/liyu1981/zcmd.zig/archive/03d1e67853a4ca5ed5e771db5544159b824c6128.tar.gz",
             .hash = "12206ecf3612cbbe7cd92cc3d29a9cb0b9441d4f006d5bb66551f1fda0ffaf9e68bd",
         },
     },
     .paths = .{
-        // This makes *all* files, recursively, included in this package. It is generally
-        // better to explicitly list the files and directories instead, to insure that
-        // fetching from tarballs, file system paths, and version control all result
-        // in the same contents hash.
         "",
-        // For example...
-        //"build.zig",
-        //"build.zig.zon",
-        //"src",
-        //"LICENSE",
-        //"README.md",
     },
 }

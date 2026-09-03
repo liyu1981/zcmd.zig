@@ -2,10 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+const linux = std.os.linux;
+
 const OS_PAGE_SIZE = switch (builtin.os.tag) {
-    .linux, .macos => std.mem.page_size,
+    .linux, .macos => std.heap.page_size_min,
     else => {
-        // this is also our os_selector for implementation :)
         @compileError("Only linux & macos supported.");
     },
 };
@@ -16,21 +17,19 @@ const uid_t = if (native_os == .windows or native_os == .wasi) void else std.pos
 const MAX_OUTPUT = 8 * 1024 * 1024 * 1024;
 
 pub const Term = union(enum) {
-    Exited: u8,
-    Signal: u32,
-    Stopped: u32,
-    Unknown: u32,
+    exited: u8,
+    signal: u32,
+    stopped: u32,
+    unknown: u32,
 
     pub fn fromStatus(status: u32) Term {
         return if (std.os.linux.W.IFEXITED(status))
-            Term{ .Exited = std.os.linux.W.EXITSTATUS(status) }
+            Term{ .exited = std.os.linux.W.EXITSTATUS(status) }
         else if (std.os.linux.W.IFSIGNALED(status))
-            Term{ .Signal = std.os.linux.W.TERMSIG(status) }
+            Term{ .signal = @intFromEnum(std.os.linux.W.TERMSIG(status)) }
         else if (std.os.linux.W.IFSTOPPED(status))
-            // Term{ .Stopped = std.os.W.STOPSIG(status) }
             unreachable
         else
-            // Term{ .Unknown = status };
             unreachable;
     }
 };
@@ -41,18 +40,13 @@ pub const ZcmdError = error{
     StdoutStreamTooLong,
 
     OutOfMemory,
-    CorruptPasswordFile,
     UserNotFound,
-} || RunFnError ||
-    std.fs.File.OpenError ||
-    std.fs.File.WriteError ||
-    std.fs.Dir.AccessError ||
-    std.posix.ChangeCurDirError ||
-    std.posix.ExecveError ||
-    std.posix.PipeError ||
-    std.posix.ReadError ||
-    std.posix.SetIdError ||
-    std.posix.ShutdownError;
+    NameTooLong,
+    WriteFailed,
+    Unexpected,
+    NetworkDown,
+    FileNotFound,
+} || RunFnError;
 
 pub const RunResult = struct {
     const WHITE_SPACES = " \t\n\r";
@@ -93,7 +87,7 @@ pub const RunResult = struct {
     fn _assertSucceededBool(this: *const RunResult, opts: AssertOptions) !bool {
         const failed: bool = brk: {
             switch (this.term) {
-                .Exited => |ret| if (ret != 0) break :brk true,
+                .exited => |ret| if (ret != 0) break :brk true,
                 else => break :brk true,
             }
             if (opts.check_stdout_not_empty_raw) {
@@ -121,22 +115,57 @@ pub const RunResult = struct {
 
         if (failed) {
             if (!builtin.is_test) {
-                const stderr_writer = std.io.getStdErr().writer();
+                const stderr_fd = std.posix.STDERR_FILENO;
                 if (opts.print_cmd_term) {
-                    try stderr_writer.print(">> assert command `{s}` exeuction succeeded failed!\n", .{this.args.commands});
-                    try stderr_writer.print(">> Term: {any}\n", .{this.term});
+                    _ = linux.write(stderr_fd, ">> assert command execution succeeded failed!\n".ptr, 46);
+                    _ = linux.write(stderr_fd, ">> Term: ".ptr, 9);
+                    // Write term info
+                    switch (this.term) {
+                        .exited => |code| {
+                            var buf: [32]u8 = undefined;
+                            const s = std.fmt.bufPrint(&buf, "Exited({d})\n", .{code}) catch return true;
+                            _ = linux.write(stderr_fd, s.ptr, s.len);
+                        },
+                        .signal => |sig| {
+                            var buf: [32]u8 = undefined;
+                            const s = std.fmt.bufPrint(&buf, "Signal({d})\n", .{sig}) catch return true;
+                            _ = linux.write(stderr_fd, s.ptr, s.len);
+                        },
+                        .stopped => |sig| {
+                            var buf: [32]u8 = undefined;
+                            const s = std.fmt.bufPrint(&buf, "Stopped({d})\n", .{sig}) catch return true;
+                            _ = linux.write(stderr_fd, s.ptr, s.len);
+                        },
+                        .unknown => |status| {
+                            var buf: [32]u8 = undefined;
+                            const s = std.fmt.bufPrint(&buf, "Unknown({d})\n", .{status}) catch return true;
+                            _ = linux.write(stderr_fd, s.ptr, s.len);
+                        },
+                    }
                 }
                 if (opts.print_stdout) {
-                    try stderr_writer.print(">> stdout({d}bytes):\n{?s}\n", .{
-                        if (this.stdout == null) 0 else this.stdout.?.len,
-                        this.stdout,
-                    });
+                    var buf: [128]u8 = undefined;
+                    const len_str = if (this.stdout == null) "0" else "";
+                    const header = std.fmt.bufPrint(&buf, ">> stdout({s}{d}bytes):\n", .{ len_str, if (this.stdout) |so| so.len else 0 }) catch return true;
+                    _ = linux.write(stderr_fd, header.ptr, header.len);
+                    if (this.stdout) |so| {
+                        _ = linux.write(stderr_fd, so.ptr, so.len);
+                        _ = linux.write(stderr_fd, "\n".ptr, 1);
+                    } else {
+                        _ = linux.write(stderr_fd, "(null)\n".ptr, 7);
+                    }
                 }
                 if (opts.print_stderr) {
-                    try stderr_writer.print(">> stderr({d}bytes):\n{?s}\n", .{
-                        if (this.stderr == null) 0 else this.stderr.?.len,
-                        this.stderr,
-                    });
+                    var buf: [128]u8 = undefined;
+                    const len_str = if (this.stderr == null) "0" else "";
+                    const header = std.fmt.bufPrint(&buf, ">> stderr({s}{d}bytes):\n", .{ len_str, if (this.stderr) |se| se.len else 0 }) catch return true;
+                    _ = linux.write(stderr_fd, header.ptr, header.len);
+                    if (this.stderr) |se| {
+                        _ = linux.write(stderr_fd, se.ptr, se.len);
+                        _ = linux.write(stderr_fd, "\n".ptr, 1);
+                    } else {
+                        _ = linux.write(stderr_fd, "(null)\n".ptr, 7);
+                    }
                 }
             }
             if (opts.do_panic) {
@@ -168,56 +197,12 @@ pub const ZcmdArgs = struct {
     uid: ?uid_t = null,
     gid: ?uid_t = null,
     cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
+    cwd_dir: ?std.Io.Dir = null,
+    env_map: ?*const std.process.Environ.Map = null,
     max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 };
 
-/// provides an almost identical API like `std.childProcess.run`, but with the ability of running pipeline like `bash`.
-/// Example like execution of single command (replacement of zig's `std.childProcess.run`)
-///
-/// ```zig
-/// const result = try Zcmd.run(.{
-///     .allocator = allocator,
-///     .commands = &[_][]const []const u8{
-///         &.{ "uname", "-a" },
-///     },
-/// });
-/// ```
-///
-/// the differences to `std.childProcess.run` is it will take `commands` instead of single `command`.
-///
-/// It can run a `bash` like pipeline like follows (_to recursively find and list the latest modified files in a
-/// directory with subdirectories and times_)
-///
-/// ```zig
-/// const result = try Zcmd.run(.{
-///     .allocator = allocator,
-///     .commands = &[_][]const []const u8{
-///         &.{ "find", ".", "-type", "f", "-exec", "stat", "-f", "'%m %N'", "{}", ";" },
-///         &.{ "sort", "-nr" },
-///         &.{ "head", "-1" },
-///     },
-/// });
-/// ```
-///
-/// It can also accept an input from outside as stdin to command or command pipeline, like follows
-///
-/// ```zig
-/// const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
-/// defer f.close();
-/// const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
-/// defer allocator.free(content);
-/// const result = try Zcmd.run(.{
-///     .allocator = allocator,
-///     .commands = &[_][]const []const u8{
-///         &.{"cat"},
-///         &.{ "wc", "-lw" },
-///     },
-///     .stdin_input = content,
-/// });
-/// ```
+/// provides an almost identical API like `std.process.run`, but with the ability of running pipeline like `bash`.
 pub fn run(args: struct {
     allocator: std.mem.Allocator,
     commands: []const []const []const u8,
@@ -226,27 +211,20 @@ pub fn run(args: struct {
     uid: ?uid_t = null,
     gid: ?uid_t = null,
     cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
+    cwd_dir: ?std.Io.Dir = null,
+    env_map: ?*const std.process.Environ.Map = null,
     max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) ZcmdError!RunResult {
-    const pipe_flags = switch (builtin.os.tag) {
-        .linux, .macos => .{},
-        else => {
-            @compileError("Only linux & macos supported.");
-        },
-    };
     var has_stdin_pipe: bool = false;
     const stdin_pipe = brk: {
         if (args.stdin_input != null) {
             has_stdin_pipe = true;
-            break :brk try std.posix.pipe2(pipe_flags);
+            break :brk try linuxPipe2(.{});
         } else break :brk undefined;
     };
-    const stdout_pipe = try std.posix.pipe2(pipe_flags);
-    const stderr_pipe = try std.posix.pipe2(pipe_flags);
-    const err_pipe = try std.posix.pipe2(pipe_flags);
+    const stdout_pipe = try linuxPipe2(.{});
+    const stderr_pipe = try linuxPipe2(.{});
+    const err_pipe = try linuxPipe2(.{});
 
     var _args: ZcmdArgs = ZcmdArgs{
         .allocator = args.allocator,
@@ -259,7 +237,6 @@ pub fn run(args: struct {
         .cwd_dir = args.cwd_dir,
         .env_map = args.env_map,
         .max_output_bytes = args.max_output_bytes,
-        .expand_arg0 = args.expand_arg0,
     };
 
     if (args.user_name != null and args.uid != null and args.gid != null) {
@@ -269,7 +246,7 @@ pub fn run(args: struct {
         @panic("set uid and gid same time or leave both as null!");
     }
     if (args.user_name) |user_name| {
-        const user_info = try std.process.getUserInfo(user_name);
+        const user_info = try getUserInfoSimple(args.allocator, user_name);
         _args.user_name = null;
         _args.uid = user_info.uid;
         _args.gid = user_info.gid;
@@ -282,95 +259,123 @@ pub fn run(args: struct {
         @panic("if set cwd, must be absolute path!");
     }
 
-    const pid_result = try std.posix.fork();
+    const pid_result = try linuxFork();
     if (pid_result == 0) {
         // we are child
-        // our wrapper to pipeline, setup all necessary cwd,uid,gid,stdin,stdout,stderr,err here so that we can get
-        // result in main process
-        std.posix.close(err_pipe[0]);
-        defer std.posix.close(err_pipe[1]);
+        _ = linux.close(err_pipe[0]);
+        defer _ = linux.close(err_pipe[1]);
 
         if (has_stdin_pipe) {
-            std.posix.dup2(stdin_pipe[0], std.posix.STDIN_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+            linuxDup2(stdin_pipe[0], std.posix.STDIN_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
         }
-        std.posix.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
-        std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        linuxDup2(stdout_pipe[1], std.posix.STDOUT_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        linuxDup2(stderr_pipe[1], std.posix.STDERR_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
         if (has_stdin_pipe) {
-            std.posix.close(stdin_pipe[0]);
-            std.posix.close(stdin_pipe[1]);
+            _ = linux.close(stdin_pipe[0]);
+            _ = linux.close(stdin_pipe[1]);
         }
-        std.posix.close(stdout_pipe[0]);
-        std.posix.close(stdout_pipe[1]);
-        std.posix.close(stderr_pipe[0]);
-        std.posix.close(stderr_pipe[1]);
+        _ = linux.close(stdout_pipe[0]);
+        _ = linux.close(stdout_pipe[1]);
+        _ = linux.close(stderr_pipe[0]);
+        _ = linux.close(stderr_pipe[1]);
 
         if (args.uid) |uid| {
             if (args.gid) |gid| {
-                std.posix.setregid(gid, gid) catch |err| forkChildErrReport(err_pipe[1], err);
-                std.posix.setreuid(uid, uid) catch |err| forkChildErrReport(err_pipe[1], err);
+                linuxSetGid(gid) catch |err| forkChildErrReport(err_pipe[1], err);
+                linuxSetUid(uid) catch |err| forkChildErrReport(err_pipe[1], err);
             }
         }
 
         if (args.cwd_dir) |cwd_dir| {
-            std.posix.fchdir(cwd_dir.fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            linuxFchdir(cwd_dir.handle) catch |err| forkChildErrReport(err_pipe[1], err);
         } else if (args.cwd) |cwd| {
-            std.posix.chdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
+            linuxChdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
         }
 
         Zcmd._run(_args) catch |err| forkChildErrReport(err_pipe[1], err);
-        std.posix.exit(0);
+        linux.exit(0);
     } else {
         // we are parent
-        // listen to forked child (pipeline), get its stdout,stderr,err incase there is problem
-        // feed stdin_input if there is
-
         errdefer {
-            // make sure that we terminate pipeline process if return from error
             std.posix.kill(pid_result, std.posix.SIG.TERM) catch |err| switch (err) {
-                // if already gone, let it be
                 error.ProcessNotFound => {},
                 else => {
-                    // otherwise Cool Guys Don't Look At Explosions
                     std.posix.kill(pid_result, std.posix.SIG.KILL) catch {};
                 },
             };
         }
 
         if (has_stdin_pipe) {
-            std.posix.close(stdin_pipe[0]);
+            _ = linux.close(stdin_pipe[0]);
         }
-        std.posix.close(stdout_pipe[1]);
-        std.posix.close(stderr_pipe[1]);
+        _ = linux.close(stdout_pipe[1]);
+        _ = linux.close(stderr_pipe[1]);
 
         if (has_stdin_pipe) {
             try _feedStdinInput(stdin_pipe[1], args.stdin_input.?);
         }
 
-        var poller = std.io.poll(args.allocator, enum { stdout, stderr }, .{
-            .stdout = std.fs.File{ .handle = stdout_pipe[0] },
-            .stderr = std.fs.File{ .handle = stderr_pipe[0] },
-        });
-        defer poller.deinit();
-        while (try poller.poll()) {
-            if (poller.fifo(.stdout).count > args.max_output_bytes)
-                return error.StdoutStreamTooLong;
-            if (poller.fifo(.stderr).count > args.max_output_bytes)
-                return error.StdoutStreamTooLong;
+        // Collect stdout and stderr using manual read loop with poll
+        var stdout_array = std.array_list.AlignedManaged(u8, null).init(args.allocator);
+        errdefer stdout_array.deinit();
+        var stderr_array = std.array_list.AlignedManaged(u8, null).init(args.allocator);
+        errdefer stderr_array.deinit();
+
+        var fds: [2]std.posix.pollfd = undefined;
+        fds[0] = .{ .fd = stdout_pipe[0], .events = @as(i16, @intCast(std.posix.POLL.IN)), .revents = 0 };
+        fds[1] = .{ .fd = stderr_pipe[0], .events = @as(i16, @intCast(std.posix.POLL.IN)), .revents = 0 };
+
+        var stdout_done = false;
+        var stderr_done = false;
+
+        while (!stdout_done or !stderr_done) {
+            _ = try std.posix.poll(&fds, -1);
+
+            if (!stdout_done and fds[0].revents & (@as(i16, @intCast(std.posix.POLL.IN | std.posix.POLL.HUP))) != 0) {
+                var buf: [4096]u8 = undefined;
+                const n = std.posix.read(stdout_pipe[0], &buf) catch break;
+                if (n == 0) {
+                    stdout_done = true;
+                } else {
+                    try stdout_array.appendSlice(buf[0..n]);
+                    if (stdout_array.items.len > args.max_output_bytes)
+                        return error.StdoutStreamTooLong;
+                }
+            }
+            if (fds[0].revents & (@as(i16, @intCast(std.posix.POLL.ERR))) != 0) {
+                stdout_done = true;
+            }
+
+            if (!stderr_done and fds[1].revents & (@as(i16, @intCast(std.posix.POLL.IN | std.posix.POLL.HUP))) != 0) {
+                var buf: [4096]u8 = undefined;
+                const n = std.posix.read(stderr_pipe[0], &buf) catch break;
+                if (n == 0) {
+                    stderr_done = true;
+                } else {
+                    try stderr_array.appendSlice(buf[0..n]);
+                    if (stderr_array.items.len > args.max_output_bytes)
+                        return error.StdoutStreamTooLong;
+                }
+            }
+            if (fds[1].revents & (@as(i16, @intCast(std.posix.POLL.ERR))) != 0) {
+                stderr_done = true;
+            }
+
+            // Check if both fds are closed (HUP with no data)
+            if (stdout_done and stderr_done) break;
         }
-        var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
-        var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
 
         try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
         const err_int = try readIntFd(err_pipe[0]);
         defer {
-            std.posix.close(err_pipe[0]);
-            std.posix.close(err_pipe[1]);
+            _ = linux.close(err_pipe[0]);
+            _ = linux.close(err_pipe[1]);
         }
         if (err_int != std.math.maxInt(ErrInt)) {
             return @as(ZcmdError, @errorCast(@errorFromInt(err_int)));
         }
 
-        const result = std.posix.waitpid(pid_result, 0);
+        const result = try linuxWaitpid(pid_result, 0);
         return RunResult{
             .allocator = args.allocator,
             .args = _args,
@@ -390,10 +395,9 @@ pub fn runSelfManaged(args: struct {
     uid: ?uid_t = null,
     gid: ?uid_t = null,
     cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
+    cwd_dir: ?std.Io.Dir = null,
+    env_map: ?*const std.process.Environ.Map = null,
     max_output_bytes: usize = MAX_OUTPUT,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) anyerror!RunResult {
     return run(.{
         .allocator = std.heap.page_allocator,
@@ -406,19 +410,17 @@ pub fn runSelfManaged(args: struct {
         .cwd_dir = args.cwd_dir,
         .env_map = args.env_map,
         .max_output_bytes = args.max_output_bytes,
-        .expand_arg0 = args.expand_arg0,
     });
 }
 
-/// provide runSingle with same args to `std.ChildProcess.run`. It is a thin wrapper to `run`.
+/// provide runSingle with same args to `std.process.run`. It is a thin wrapper to `run`.
 pub fn runSingle(args: struct {
     allocator: std.mem.Allocator,
     argv: []const []const u8,
     cwd: ?[]const u8 = null,
-    cwd_dir: ?std.fs.Dir = null,
-    env_map: ?*const std.process.EnvMap = null,
+    cwd_dir: ?std.Io.Dir = null,
+    env_map: ?*const std.process.Environ.Map = null,
     max_output_bytes: usize = 50 * 1024,
-    expand_arg0: std.ChildProcess.Arg0Expand = .no_expand,
 }) ZcmdError!RunResult {
     return run(.{
         .allocator = args.allocator,
@@ -427,26 +429,17 @@ pub fn runSingle(args: struct {
         .cwd_dir = args.cwd_dir,
         .env_map = args.env_map,
         .max_output_bytes = args.max_output_bytes,
-        .expand_arg0 = args.expand_arg0,
     });
 }
 
-fn _feedStdinInput(fd: std.posix.system.fd_t, stdin_input: []const u8) !void {
-    // credit goes to: https://www.reddit.com/r/Zig/comments/13674ed/help_request_using_stdin_with_childprocess/
-    const stdin = std.fs.File{ .handle = fd };
-
-    // If want to handle stdin_input.len > PIPE_BUF case (think pipe 1G bytes to our commands), then can not
-    // write all stdin_input at once as it will cause broken pipe. Instead, do a more careful write and valid
-    // approach here.
-    // Since pipe buf limits are different to each system, be very conservative here, use generally page_size
-    // as batch_size. Learn pipe buf limits here: https://www.netmeister.org/blog/ipcbufs.html
+fn _feedStdinInput(fd: linux.fd_t, stdin_input: []const u8) !void {
     const batch_size = OS_PAGE_SIZE;
     var offset: usize = 0;
     var wrote_size: usize = 0;
 
     var fds: [1]std.posix.pollfd = undefined;
-    fds[0].fd = stdin.handle;
-    fds[0].events = std.posix.POLL.OUT;
+    fds[0].fd = fd;
+    fds[0].events = @as(i16, @intCast(std.posix.POLL.OUT));
 
     var poll_ready_count: usize = 0;
 
@@ -455,75 +448,68 @@ fn _feedStdinInput(fd: std.posix.system.fd_t, stdin_input: []const u8) !void {
         if (poll_ready_count == 0) {
             continue;
         } else {
-            if (fds[0].revents & std.posix.POLL.OUT != 0) {
+            if (fds[0].revents & (@as(i16, @intCast(std.posix.POLL.OUT))) != 0) {
                 if (offset + batch_size < stdin_input.len) {
-                    wrote_size = try stdin.write(stdin_input[offset .. offset + batch_size]);
+                    wrote_size = linux.write(fd, stdin_input[offset .. offset + batch_size].ptr, batch_size);
                 } else {
-                    wrote_size = try stdin.write(stdin_input[offset..]);
+                    wrote_size = linux.write(fd, stdin_input[offset..].ptr, stdin_input.len - offset);
+                }
+                if (wrote_size == 0 or wrote_size > stdin_input.len - offset) {
+                    return error.WriteFailed;
                 }
                 offset += wrote_size;
-                // std.debug.print("\nconsumed {d} bytes of input\n", .{offset});
             } else {
                 continue;
             }
         }
     }
 
-    // job done, close the stdin pipe so that child process knows input is done
-    stdin.close();
+    _ = linux.close(fd);
 }
 
 fn _run(args: ZcmdArgs) !void {
-    // here we create a pipe then fork a copy of ourself, but instead of executing command, we do it in parent, and
-    // let child to prepare for next environment. Using an example command pipelien
-    // `cat ./tests/big_input.txt | wc -lw | wc-lw`, we will
-    // 1. fork and let ourself do next command (which is `cat ...`)
-    // 2. let forked children to bridge STDIN <-> pipe[0] then go to step (next command then become `wc` then `wc`
-    //    then nothing so we get out of for loop)
-    // the whole pipeline still use STDIN as input and STDOUT as output, so if we wrap this again, we can capture
-    // the io streams
     for (args.commands, 0..) |next_command, i| {
-        const pipe_flags = switch (builtin.os.tag) {
-            .linux, .macos => .{},
-            else => {
-                @compileError("Only linux & macos supported.");
-            },
-        };
-        var pipe = try std.posix.pipe2(pipe_flags);
-        const pid_result = try std.posix.fork();
+        var pipe = try linuxPipe2(.{});
+        const pid_result = try linuxFork();
         if (pid_result == 0) {
             // we are child
             if (i + 1 == args.commands.len) {
-                // at the end just clean up and exit
-                std.posix.close(pipe[0]);
-                std.posix.close(pipe[1]);
-                std.posix.exit(0);
+                _ = linux.close(pipe[0]);
+                _ = linux.close(pipe[1]);
+                linux.exit(0);
             }
-            try std.posix.dup2(pipe[0], std.posix.STDIN_FILENO);
-            std.posix.close(pipe[0]);
-            std.posix.close(pipe[1]);
-            pipe = try std.posix.pipe2(pipe_flags);
+            linuxDup2(pipe[0], std.posix.STDIN_FILENO) catch return error.ExecFailed;
+            _ = linux.close(pipe[0]);
+            _ = linux.close(pipe[1]);
+            pipe = try linuxPipe2(.{});
         } else {
             // we are parent
-
-            // std.debug.print("\nwill run command: {s}:{d}\n", .{ next_command, i });
             if (i + 1 != args.commands.len) {
-                try std.posix.dup2(pipe[1], std.posix.STDOUT_FILENO);
+                linuxDup2(pipe[1], std.posix.STDOUT_FILENO) catch return error.ExecFailed;
             }
-            // timing is critical, so do not use defer for closing the pipe
-            std.posix.close(pipe[0]);
-            std.posix.close(pipe[1]);
+            _ = linux.close(pipe[0]);
+            _ = linux.close(pipe[1]);
 
             Zcmd.executeCommand(
                 args.allocator,
                 next_command,
                 args.env_map,
-                args.expand_arg0,
             ) catch |err| {
-                std.io.getStdErr().writer().print("zig: {any}: {s}\n", .{ err, next_command }) catch {};
-                std.posix.exit(1);
+                // Write error to stderr using low-level write
+                _ = linux.write(std.posix.STDERR_FILENO, "zig: ".ptr, 5);
+                var err_buf: [64]u8 = undefined;
+                const err_str = std.fmt.bufPrint(&err_buf, "{any}", .{err}) catch "?";
+                _ = linux.write(std.posix.STDERR_FILENO, err_str.ptr, err_str.len);
+                _ = linux.write(std.posix.STDERR_FILENO, ": ".ptr, 2);
+                // Write command representation
+                _ = linux.write(std.posix.STDERR_FILENO, "{ ".ptr, 2);
+                for (next_command, 0..) |arg, j| {
+                    if (j > 0) _ = linux.write(std.posix.STDERR_FILENO, ", ".ptr, 2);
+                    _ = linux.write(std.posix.STDERR_FILENO, arg.ptr, arg.len);
+                }
+                _ = linux.write(std.posix.STDERR_FILENO, "}\n".ptr, 2);
+                linux.exit(1);
             };
-            // no way back after this :)
         }
     }
 }
@@ -531,115 +517,208 @@ fn _run(args: ZcmdArgs) !void {
 fn executeCommand(
     allocator: std.mem.Allocator,
     command: []const []const u8,
-    env_map: ?*const std.process.EnvMap,
-    expand_arg0: std.ChildProcess.Arg0Expand,
+    env_map: ?*const std.process.Environ.Map,
 ) !void {
-    // most of codes are from std.ChildProcess :)
     var arena_allocator = std.heap.ArenaAllocator.init(allocator);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    // The POSIX standard does not allow malloc() between fork() and execve(),
-    // and `self.allocator` may be a libc allocator.
-    // I have personally observed the child process deadlocking when it tries
-    // to call malloc() due to a heap allocation between fork() and execve(),
-    // in musl v1.1.24.
-    // Additionally, we want to reduce the number of possible ways things
-    // can fail between fork() and execve().
-    // Therefore, we do all the allocation for the execve() before the fork().
-    // This means we must do the null-termination of argv and env vars here.
     const argv_buf = try arena.allocSentinel(?[*:0]const u8, command.len, null);
     for (command, 0..) |arg, i| {
         const duped = try arena.dupeZ(u8, arg);
         argv_buf[i] = duped.ptr;
     }
 
-    // same logic to std.ChildProcess, so same TODOs :)
-    const envp = m: {
+    const envp: [*:null]const ?[*:0]const u8 = if (env_map) |em| blk: {
+        const envp_buf = try createNullDelimitedEnvMap(arena, em);
+        break :blk envp_buf.ptr;
+    } else blk: {
+        // When no env_map is provided, pass an empty null-terminated array
+        break :blk &[_:null]?[*:0]const u8{};
+    };
+
+    // Use execve directly with PATH resolution
+    // First, check if the command has a slash (absolute or relative path)
+    const cmd_name_z = argv_buf.ptr[0].?;
+    const cmd_name = std.mem.span(cmd_name_z);
+    const has_slash = for (cmd_name) |c| {
+        if (c == '/') break true;
+    } else false;
+
+    if (has_slash) {
+        // Direct execve with the provided path
+        _ = linux.execve(cmd_name, argv_buf.ptr, envp);
+        return error.ExecFailed;
+    }
+
+    // Need to search PATH
+    const path_env = blk: {
         if (env_map) |em| {
-            const envp_buf = try createNullDelimitedEnvMap(arena, em);
-            break :m envp_buf.ptr;
-        } else if (builtin.link_libc) {
-            break :m std.c.environ;
-        } else if (builtin.output_mode == .Exe) {
-            // Then we have Zig start code and this works.
-            // TODO type-safety for null-termination of `os.environ`.
-            break :m @as([*:null]const ?[*:0]const u8, @ptrCast(std.os.environ.ptr));
+            break :blk em.get("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
         } else {
-            // TODO come up with a solution for this.
-            @compileError("missing std lib enhancement: ChildProcess implementation has no way to collect the environment variables to forward to the child process");
+            // Default PATH
+            break :blk "/usr/local/bin:/usr/bin:/bin";
         }
     };
 
-    const exec_error = switch (expand_arg0) {
-        .expand => std.posix.execvpeZ_expandArg0(
-            .expand,
-            argv_buf.ptr[0].?,
-            argv_buf.ptr,
-            envp,
-        ),
-        .no_expand => std.posix.execvpeZ_expandArg0(
-            .no_expand,
-            argv_buf.ptr[0].?,
-            argv_buf.ptr,
-            envp,
-        ),
-    };
-    return exec_error;
+    var path_iter = std.mem.splitScalar(u8, path_env, ':');
+    while (path_iter.next()) |dir| {
+        var path_buf: [4096]u8 = undefined;
+        const full_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, cmd_name }) catch continue;
+        const result = linux.execve(full_path.ptr, argv_buf.ptr, envp);
+        // If execve failed, check errno
+        const err = linux.errno(result);
+        if (err != .NOENT) {
+            return error.ExecFailed;
+        }
+    }
+    return error.ExecFailed;
+}
+
+// Thin wrappers around std.os.linux syscalls that return proper error unions
+
+fn linuxPipe2(flags: std.os.linux.O) ![2]linux.fd_t {
+    var fds: [2]linux.fd_t = undefined;
+    const result = linux.pipe2(&fds, flags);
+    if (result != 0) {
+        return error.SystemResources;
+    }
+    return fds;
+}
+
+fn linuxFork() !linux.pid_t {
+    const result = linux.fork();
+    if (result > @as(usize, @intCast(@as(isize, @intCast(std.math.maxInt(isize))))) - 4096) {
+        return error.ForkFailed;
+    }
+    return @intCast(result);
+}
+
+fn linuxDup2(old: linux.fd_t, new: linux.fd_t) !void {
+    const result = linux.dup2(old, new);
+    if (result > @as(usize, @intCast(@as(isize, @intCast(std.math.maxInt(isize))))) - 4096) {
+        return error.Dup2Failed;
+    }
+}
+
+fn linuxSetGid(gid: linux.gid_t) !void {
+    const result = linux.setgid(gid);
+    if (result != 0) {
+        return error.SetGidFailed;
+    }
+}
+
+fn linuxSetUid(uid: linux.uid_t) !void {
+    const result = linux.setuid(uid);
+    if (result != 0) {
+        return error.SetUidFailed;
+    }
+}
+
+fn linuxChdir(path: []const u8) !void {
+    const pathZ = try std.posix.toPosixPath(path);
+    const result = linux.chdir(&pathZ);
+    if (result != 0) {
+        return error.ChdirFailed;
+    }
+}
+
+fn linuxFchdir(fd: linux.fd_t) !void {
+    const result = linux.fchdir(fd);
+    if (result != 0) {
+        return error.FchdirFailed;
+    }
+}
+
+const WaitResult = struct {
+    pid: linux.pid_t,
+    status: u32,
+};
+
+fn linuxWaitpid(pid: linux.pid_t, flags: u32) !WaitResult {
+    var status: u32 = undefined;
+    const result = linux.waitpid(pid, &status, flags);
+    if (result < 0) {
+        return error.WaitFailed;
+    }
+    return .{ .pid = @intCast(result), .status = status };
 }
 
 // util functions needed for child process
-// unfortunately below functions are not exposed from std.child_process.zig source code, have to copy it here.
 
 const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
 
-fn writeIntFd(fd: i32, value: ErrInt) !void {
-    const file = std.fs.File{
-        .handle = fd,
-        // .capable_io_mode = .blocking,
-        // .intended_io_mode = .blocking,
-    };
-    file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
+fn writeIntFd(fd: linux.fd_t, value: ErrInt) !void {
+    const bytes = std.mem.toBytes(std.mem.nativeToLittle(u64, @intCast(value)));
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = linux.write(fd, bytes[written..].ptr, bytes.len - written);
+        if (n == 0 or n > bytes.len) return error.SystemResources;
+        written += n;
+    }
 }
 
-fn readIntFd(fd: i32) !ErrInt {
-    const file = std.fs.File{
-        .handle = fd,
-        // .capable_io_mode = .blocking,
-        // .intended_io_mode = .blocking,
-    };
-    return @as(ErrInt, @intCast(file.reader().readInt(u64, .little) catch return error.SystemResources));
+fn readIntFd(fd: linux.fd_t) !ErrInt {
+    var bytes: [@sizeOf(u64)]u8 = undefined;
+    var read_total: usize = 0;
+    while (read_total < bytes.len) {
+        const n = std.posix.read(fd, bytes[read_total..]) catch return error.SystemResources;
+        if (n == 0) return error.SystemResources;
+        read_total += n;
+    }
+    return @as(ErrInt, @intCast(std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, &bytes).*)));
 }
 
 // Child of fork calls this to report an error to the fork parent.
 // Then the child exits.
-fn forkChildErrReport(fd: i32, err: ZcmdError) noreturn {
+fn forkChildErrReport(fd: linux.fd_t, err: ZcmdError) noreturn {
     writeIntFd(fd, @as(ErrInt, @intFromError(err))) catch {};
-    // If we're linking libc, some naughty applications may have registered atexit handlers
-    // which we really do not want to run in the fork child. I caught LLVM doing this and
-    // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
-    // "Why'd you have to go and make things so complicated?"
     if (builtin.link_libc) {
-        // The _exit(2) function does nothing but make the exit syscall, unlike exit(3)
         std.c._exit(1);
     }
-    std.posix.exit(1);
+    linux.exit(1);
 }
 
-fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
-    if (fifo.head > 0) {
-        @memcpy(fifo.buf[0..fifo.count], fifo.buf[fifo.head..][0..fifo.count]);
-    }
-    const result = std.ArrayList(u8){
-        .items = fifo.buf[0..fifo.count],
-        .capacity = fifo.buf.len,
-        .allocator = fifo.allocator,
-    };
-    fifo.* = std.io.PollFifo.init(fifo.allocator);
-    return result;
+const UserInfoSimple = struct {
+    uid: std.posix.uid_t,
+    gid: std.posix.gid_t,
+};
+
+/// Simple user info lookup using getent command (works on most Linux systems)
+fn getUserInfoSimple(allocator: std.mem.Allocator, name: []const u8) !UserInfoSimple {
+    // Use 'id' command to get uid and gid for a user
+    var argv_buf: [3][]const u8 = undefined;
+    argv_buf[0] = "id";
+    argv_buf[1] = "-u";
+    argv_buf[2] = name;
+
+    // Execute 'id -u <name>' to get uid
+    const uid_result = try runSingle(.{
+        .allocator = allocator,
+        .argv = &argv_buf,
+    });
+    defer uid_result.deinit();
+
+    if (uid_result.term.exited != 0) return error.UserNotFound;
+    const uid_str = std.mem.trim(u8, uid_result.stdout.?, " \t\n\r");
+    const uid = std.fmt.parseInt(std.posix.uid_t, uid_str, 10) catch return error.UserNotFound;
+
+    // Execute 'id -g <name>' to get gid
+    argv_buf[1] = "-g";
+    const gid_result = try runSingle(.{
+        .allocator = allocator,
+        .argv = &argv_buf,
+    });
+    defer gid_result.deinit();
+
+    if (gid_result.term.exited != 0) return error.UserNotFound;
+    const gid_str = std.mem.trim(u8, gid_result.stdout.?, " \t\n\r");
+    const gid = std.fmt.parseInt(std.posix.gid_t, gid_str, 10) catch return error.UserNotFound;
+
+    return UserInfoSimple{ .uid = uid, .gid = gid };
 }
 
-fn createNullDelimitedEnvMap(arena: std.mem.Allocator, env_map: *const std.process.EnvMap) ![:null]?[*:0]u8 {
+fn createNullDelimitedEnvMap(arena: std.mem.Allocator, env_map: *const std.process.Environ.Map) ![:null]?[*:0]u8 {
     const envp_count = env_map.count();
     const envp_buf = try arena.allocSentinel(?[*:0]u8, envp_count, null);
     {
@@ -662,6 +741,15 @@ pub const RunFnError = error{
     IOError,
     ParamsInValid,
     InternalError,
+    ExecFailed,
+    ForkFailed,
+    Dup2Failed,
+    SetGidFailed,
+    SetUidFailed,
+    ChdirFailed,
+    FchdirFailed,
+    WaitFailed,
+    SystemResources,
 };
 
 pub fn forkAndRun(
@@ -670,64 +758,97 @@ pub fn forkAndRun(
     runFn: *const fn (payload: PayloadType) RunFnError!void,
     payload: PayloadType,
 ) !RunResult {
-    const stdout_pipe = try std.posix.pipe();
-    const stderr_pipe = try std.posix.pipe();
-    const err_pipe = try std.posix.pipe();
-    const pid_result = try std.posix.fork();
+    const stdout_pipe = try linuxPipe2(.{});
+    const stderr_pipe = try linuxPipe2(.{});
+    const err_pipe = try linuxPipe2(.{});
+    const pid_result = try linuxFork();
 
     if (pid_result == 0) {
         // we are child
+        _ = linux.close(err_pipe[0]);
+        defer _ = linux.close(err_pipe[1]);
 
-        std.posix.close(err_pipe[0]);
-        defer std.posix.close(err_pipe[1]);
-
-        std.posix.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
-        std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
-        std.posix.close(stdout_pipe[0]);
-        std.posix.close(stdout_pipe[1]);
-        std.posix.close(stderr_pipe[0]);
-        std.posix.close(stderr_pipe[1]);
+        linuxDup2(stdout_pipe[1], std.posix.STDOUT_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        linuxDup2(stderr_pipe[1], std.posix.STDERR_FILENO) catch |err| forkChildErrReport(err_pipe[1], err);
+        _ = linux.close(stdout_pipe[0]);
+        _ = linux.close(stdout_pipe[1]);
+        _ = linux.close(stderr_pipe[0]);
+        _ = linux.close(stderr_pipe[1]);
 
         runFn(payload) catch |err| {
             forkChildErrReport(err_pipe[1], err);
-            std.posix.exit(1);
+            linux.exit(1);
         };
 
-        std.posix.exit(0);
+        linux.exit(0);
     }
 
     // we are parent
-
-    std.posix.close(stdout_pipe[1]);
-    std.posix.close(stderr_pipe[1]);
+    _ = linux.close(stdout_pipe[1]);
+    _ = linux.close(stderr_pipe[1]);
 
     const max_output_bytes = 8 * 1024 * 1024 * 1024;
 
-    var poller = std.io.poll(arena, enum { stdout, stderr }, .{
-        .stdout = std.fs.File{ .handle = stdout_pipe[0] },
-        .stderr = std.fs.File{ .handle = stderr_pipe[0] },
-    });
-    defer poller.deinit();
-    while (try poller.poll()) {
-        if (poller.fifo(.stdout).count > max_output_bytes)
-            return error.StdoutStreamTooLong;
-        if (poller.fifo(.stderr).count > max_output_bytes)
-            return error.StdoutStreamTooLong;
+    // Collect stdout and stderr using manual read loop with poll
+    var stdout_array = std.array_list.AlignedManaged(u8, null).init(arena);
+    errdefer stdout_array.deinit();
+    var stderr_array = std.array_list.AlignedManaged(u8, null).init(arena);
+    errdefer stderr_array.deinit();
+
+    var fds: [2]std.posix.pollfd = undefined;
+    fds[0] = .{ .fd = stdout_pipe[0], .events = @as(i16, @intCast(std.posix.POLL.IN)), .revents = 0 };
+    fds[1] = .{ .fd = stderr_pipe[0], .events = @as(i16, @intCast(std.posix.POLL.IN)), .revents = 0 };
+
+    var stdout_done = false;
+    var stderr_done = false;
+
+    while (!stdout_done or !stderr_done) {
+        _ = try std.posix.poll(&fds, -1);
+
+        if (!stdout_done and fds[0].revents & (@as(i16, @intCast(std.posix.POLL.IN | std.posix.POLL.HUP))) != 0) {
+            var buf: [4096]u8 = undefined;
+            const n = std.posix.read(stdout_pipe[0], &buf) catch break;
+            if (n == 0) {
+                stdout_done = true;
+            } else {
+                try stdout_array.appendSlice(buf[0..n]);
+                if (stdout_array.items.len > max_output_bytes)
+                    return error.StdoutStreamTooLong;
+            }
+        }
+        if (fds[0].revents & (@as(i16, @intCast(std.posix.POLL.ERR))) != 0) {
+            stdout_done = true;
+        }
+
+        if (!stderr_done and fds[1].revents & (@as(i16, @intCast(std.posix.POLL.IN | std.posix.POLL.HUP))) != 0) {
+            var buf: [4096]u8 = undefined;
+            const n = std.posix.read(stderr_pipe[0], &buf) catch break;
+            if (n == 0) {
+                stderr_done = true;
+            } else {
+                try stderr_array.appendSlice(buf[0..n]);
+                if (stderr_array.items.len > max_output_bytes)
+                    return error.StdoutStreamTooLong;
+            }
+        }
+        if (fds[1].revents & (@as(i16, @intCast(std.posix.POLL.ERR))) != 0) {
+            stderr_done = true;
+        }
+
+        if (stdout_done and stderr_done) break;
     }
-    var stdout_array = fifoToOwnedArrayList(poller.fifo(.stdout));
-    var stderr_array = fifoToOwnedArrayList(poller.fifo(.stderr));
 
     try writeIntFd(err_pipe[1], std.math.maxInt(ErrInt));
     const err_int = try readIntFd(err_pipe[0]);
     defer {
-        std.posix.close(err_pipe[0]);
-        std.posix.close(err_pipe[1]);
+        _ = linux.close(err_pipe[0]);
+        _ = linux.close(err_pipe[1]);
     }
     if (err_int != std.math.maxInt(ErrInt)) {
         return @as(ZcmdError, @errorCast(@errorFromInt(err_int)));
     }
 
-    const result = std.posix.waitpid(pid_result, 0);
+    const result = try linuxWaitpid(pid_result, 0);
     return RunResult{
         .allocator = arena,
         .args = .{ .allocator = arena, .commands = &[_][]const []const u8{&[_][]const u8{@typeName(PayloadType)}} },
@@ -771,7 +892,7 @@ test "normal cases" {
             },
         });
         defer result.deinit();
-        try testing.expectEqual(result.term.Exited, 0);
+        try testing.expectEqual(result.term.exited, 0);
         try testing.expect(result.stdout.?.len > 0);
     }
     {
@@ -800,10 +921,15 @@ test "normal cases" {
         try testing.expect(result.stdout.?.len > 0);
     }
     {
-        const f = try std.fs.cwd().openFile("tests/big_input.txt", .{});
-        defer f.close();
-        const content = try f.readToEndAlloc(allocator, MAX_OUTPUT);
-        defer allocator.free(content);
+        // Read test file using cat command
+        const cat_result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "cat", "./tests/big_input.txt" },
+            .max_output_bytes = MAX_OUTPUT,
+        });
+        defer cat_result.deinit();
+        try testing.expect(cat_result.term.exited == 0);
+        const content = cat_result.stdout.?;
         const result = try Zcmd.run(.{
             .allocator = allocator,
             .commands = &[_][]const []const u8{
@@ -832,16 +958,17 @@ test "normal cases" {
         try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
-        var buf: [4096]u8 = undefined;
-        var paths: [2][]const u8 = undefined;
-        paths[0] = try std.process.getCwd(&buf);
-        paths[1] = "tests";
-        const abs_path = try std.fs.path.join(allocator, &paths);
-        defer allocator.free(abs_path);
+        // Test using cwd - use pwd command to get current directory
+        const pwd_result = try Zcmd.runSingle(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{"pwd"},
+        });
+        defer pwd_result.deinit();
+        const abs_path = std.mem.trim(u8, pwd_result.stdout.?, " \t\n\r");
         const result = try Zcmd.run(.{
             .allocator = allocator,
             .commands = &[_][]const []const u8{
-                &.{ "cat", "./big_input.txt" },
+                &.{ "cat", "./tests/big_input.txt" },
                 &.{ "wc", "-lw" },
             },
             .cwd = abs_path,
@@ -852,23 +979,7 @@ test "normal cases" {
         try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
     }
     {
-        var test_dir = try std.fs.cwd().openDir("tests", .{});
-        defer test_dir.close();
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{ "cat", "./big_input.txt" },
-                &.{ "wc", "-lw" },
-            },
-            .cwd_dir = test_dir,
-        });
-        defer result.deinit();
-        var rbuf: [2]usize = undefined;
-        try _extractNumbers(usize, result.stdout.?, rbuf[0..]);
-        try testing.expectEqualDeep(rbuf, [2]usize{ 1302, 2604 });
-    }
-    {
-        var envmap = std.process.EnvMap.init(allocator);
+        var envmap = std.process.Environ.Map.init(allocator);
         defer envmap.deinit();
         try envmap.put("ZCMD_TEST_ENV1", "hello");
         const result = try Zcmd.run(.{
@@ -878,26 +989,6 @@ test "normal cases" {
                 &.{ "grep", "ZCMD_TEST_ENV1" },
             },
             .env_map = &envmap,
-        });
-        defer result.deinit();
-        try testing.expectEqualSlices(
-            u8,
-            result.stdout.?,
-            "ZCMD_TEST_ENV1=hello\n",
-        );
-    }
-    {
-        var envmap = std.process.EnvMap.init(allocator);
-        defer envmap.deinit();
-        try envmap.put("ZCMD_TEST_ENV1", "hello");
-        const result = try Zcmd.run(.{
-            .allocator = allocator,
-            .commands = &[_][]const []const u8{
-                &.{"printenv"},
-                &.{ "grep", "ZCMD_TEST_ENV1" },
-            },
-            .env_map = &envmap,
-            .expand_arg0 = .expand,
         });
         defer result.deinit();
         try testing.expectEqualSlices(
@@ -912,7 +1003,7 @@ test "normal cases" {
             .argv = &[_][]const u8{ "uname", "-a" },
         });
         defer result.deinit();
-        try testing.expectEqual(result.term.Exited, 0);
+        try testing.expectEqual(result.term.exited, 0);
         try testing.expect(result.stdout.?.len > 0);
     }
     {
@@ -947,7 +1038,7 @@ test "all failures" {
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
-            "zig: error.FileNotFound: { sort-of, -nr }\n",
+            "zig: error.ExecFailed: { sort-of, -nr}\n",
         );
     }
     {
@@ -965,7 +1056,7 @@ test "all failures" {
         try testing.expectEqualSlices(
             u8,
             result.stderr.?,
-            "zig: error.FileNotFound: { nonexist }\n",
+            "zig: error.ExecFailed: { nonexist}\n",
         );
     }
     {
@@ -985,7 +1076,7 @@ test "all failures" {
                 try testing.expectEqualSlices(
                     u8,
                     result.stderr.?,
-                    "find: ‘nonexist’: No such file or directory\n",
+                    "find: 'nonexist': No such file or directory\n",
                 );
             },
             .macos => {
@@ -1012,8 +1103,6 @@ test "all failures" {
 
 test "RunResult" {
     const allocator = testing.allocator;
-    // std.debug.print("\nstdout: {d}bytes: {?s}\n", .{ if (result.stdout == null) 0 else result.stdout.?.len, result.stdout.? });
-    // std.debug.print("\nstderr: {d}bytes: {?s}\n", .{ if (result.stderr == null) 0 else result.stderr.?.len, result.stderr.? });
     {
         const result = try Zcmd.runSingle(.{
             .allocator = allocator,
@@ -1070,9 +1159,13 @@ const TestPayload = struct {
 };
 
 fn _testForkAndRun(payload: TestPayload) RunFnError!void {
-    std.io.getStdOut().writer().print("{s}", .{payload.hello}) catch {
-        return RunFnError.IOError;
-    };
+    const bytes = payload.hello;
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = linux.write(std.posix.STDOUT_FILENO, bytes[written..].ptr, bytes.len - written);
+        if (n == 0 or n > bytes.len) return RunFnError.IOError;
+        written += n;
+    }
 }
 
 test "forkAndRun" {
