@@ -90,7 +90,7 @@ Please check [example/zcmd_build_app](https://github.com/liyu1981/zcmd.zig/tree/
 use following bash in your project folder (with `build.zig.zon`)
 
 ```
-zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.4.0.tar.gz
+zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.5.0.tar.gz
 ```
 
 you can change the version to other version if there are in [release](https://github.com/liyu1981/zcmd.zig/releases) page.
@@ -101,7 +101,7 @@ It is a single file lib with no dependencies!
 
 ## Requirements
 
-- Zig 0.16.0 or later
+- Zig 0.17.0 or later
 - Linux or macOS
 
 ## Zig Docs
@@ -118,6 +118,18 @@ zig build test
 ```
 
 For coverage test, as `kcov` is working in a way of 'debug every line and record', it can not work with `zcmd` tests. `zcmd` tests will fork many sub processes and if one of them be stopped the whole pipeline hangs. I am still in searching of what's the best method to cover.
+
+## Changes from v0.4.0
+
+This version (v0.5.0) has been updated for Zig 0.17.0 compatibility. All changes are internal; the public API is unchanged.
+
+- **Allocator API**: `Allocator.dupeZ` was removed; now uses `Allocator.dupeSentinel`
+- **Type helpers**: `std.meta.Int` was removed; now uses the `@Int` builtin
+- **Formatting**: `std.fmt.bufPrintZ` was removed; now uses `std.fmt.bufPrintSentinel`
+- **waitpid**: `std.os.linux.waitpid` now takes an `*i32` status and returns a raw syscall result, handled via `std.os.linux.errno`
+- **Build API**: custom `Step.makeFn` steps and `b.args` were removed; examples now use `b.addWriteFile` plus an anonymous import, and `run_cmd.addPassthruArgs()`
+
+The previous v0.4.0 release remains available for Zig 0.16.0 users.
 
 ## Changes from v0.3.0
 

@@ -1,20 +1,19 @@
 const std = @import("std");
 
 test "stop test" {
-    var io = std.Io.Threaded.init(.{}) catch return;
-    defer io.deinit();
-    const io_handle = io.io();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io_handle = threaded.io();
 
     const rr = try std.process.run(
-        @import("std").testing.allocator,
+        std.testing.allocator,
         io_handle,
         .{
             .argv = &[_][]const u8{"./exit_stop"},
         },
     );
     defer {
-        @import("std").testing.allocator.free(rr.stdout);
-        @import("std").testing.allocator.free(rr.stderr);
+        std.testing.allocator.free(rr.stdout);
+        std.testing.allocator.free(rr.stderr);
     }
-    _ = rr;
 }

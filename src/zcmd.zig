@@ -525,7 +525,7 @@ fn executeCommand(
 
     const argv_buf = try arena.allocSentinel(?[*:0]const u8, command.len, null);
     for (command, 0..) |arg, i| {
-        const duped = try arena.dupeZ(u8, arg);
+        const duped = try arena.dupeSentinel(u8, arg, 0);
         argv_buf[i] = duped.ptr;
     }
 
@@ -564,7 +564,7 @@ fn executeCommand(
     var path_iter = std.mem.splitScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
         var path_buf: [4096]u8 = undefined;
-        const full_path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, cmd_name }) catch continue;
+        const full_path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, cmd_name }, 0) catch continue;
         const result = linux.execve(full_path.ptr, argv_buf.ptr, envp);
         // If execve failed, check errno
         const err = linux.errno(result);
@@ -636,17 +636,17 @@ const WaitResult = struct {
 };
 
 fn linuxWaitpid(pid: linux.pid_t, flags: u32) !WaitResult {
-    var status: u32 = undefined;
+    var status: i32 = undefined;
     const result = linux.waitpid(pid, &status, flags);
-    if (result < 0) {
+    if (linux.errno(result) != .SUCCESS) {
         return error.WaitFailed;
     }
-    return .{ .pid = @intCast(result), .status = status };
+    return .{ .pid = @intCast(result), .status = @bitCast(status) };
 }
 
 // util functions needed for child process
 
-const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
+const ErrInt = @Int(.unsigned, @sizeOf(anyerror) * 8);
 
 fn writeIntFd(fd: linux.fd_t, value: ErrInt) !void {
     const bytes = std.mem.toBytes(std.mem.nativeToLittle(u64, @intCast(value)));

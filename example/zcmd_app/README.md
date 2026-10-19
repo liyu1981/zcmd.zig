@@ -5,7 +5,7 @@
 (in folder `zcmd_app`)
 
 ```zig
-zig fetch --save zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.2.1.tar.gz
+zig fetch --save https://github.com/liyu1981/zcmd.zig/archive/refs/tags/v0.5.0.tar.gz
 ```
 
 ### build run

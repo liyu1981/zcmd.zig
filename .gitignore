@@ -47,6 +47,7 @@ Temporary Items
 # Zig programming language
 
 zig-cache/
+.zig-cache/
 zig-out/
 build/
 build-*/
